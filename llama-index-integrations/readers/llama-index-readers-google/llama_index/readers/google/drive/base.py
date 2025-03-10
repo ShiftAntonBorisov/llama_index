@@ -24,7 +24,7 @@ from llama_index.core.schema import Document
 logger = logging.getLogger(__name__)
 
 # Scope for reading and downloading google drive files
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 class GoogleDriveReader(

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass
 from unittest import mock
 
 # import aiohttp to force Pants to include it in the required dependencies
@@ -10,6 +11,7 @@ import pytest
 from azure.ai.inference.models import (
     ChatChoice,
     ChatCompletions,
+    ChatCompletionsToolChoicePreset,
     ChatResponseMessage,
     ModelInfo,
 )
@@ -18,6 +20,12 @@ from llama_index.core.tools import FunctionTool
 from llama_index.llms.azure_inference import AzureAICompletionsModel
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AsyncClientFixture:
+    llm: AzureAICompletionsModel
+    client_instance: mock.MagicMock
 
 
 @pytest.fixture(scope="session")
@@ -47,18 +55,40 @@ def test_params() -> dict:
 
 
 @pytest.fixture()
-def test_llm():
+def azure_llm_async_fixture():
     with mock.patch(
         "llama_index.llms.azure_inference.base.ChatCompletionsClient", autospec=True
     ):
         with mock.patch(
             "llama_index.llms.azure_inference.base.ChatCompletionsClientAsync",
             autospec=True,
-        ):
+        ) as mock_async_client_cls:
             llm = AzureAICompletionsModel(
                 endpoint="https://my-endpoint.inference.ai.azure.com",
                 credential="my-api-key",
             )
+    client_instance = mock_async_client_cls.return_value
+    # Azure async client's __aenter__ returns self; mirror that behavior in tests.
+    client_instance.__aenter__.return_value = client_instance
+    return AsyncClientFixture(llm=llm, client_instance=client_instance)
+
+
+@pytest.fixture()
+def test_llm(azure_llm_async_fixture):
+    llm = azure_llm_async_fixture.llm
+    client_instance = azure_llm_async_fixture.client_instance
+    entered_client = client_instance.__aenter__.return_value
+    entered_client.complete = mock.AsyncMock(
+        return_value=ChatCompletions(
+            choices=[
+                ChatChoice(
+                    message=ChatResponseMessage(
+                        content="Yes, this is a test.", role="assistant"
+                    )
+                )
+            ]
+        )
+    )
     llm._client.complete.return_value = ChatCompletions(
         choices=[
             ChatChoice(
@@ -72,17 +102,6 @@ def test_llm():
         model_name="my_model_name",
         model_provider_name="my_provider_name",
         model_type="chat-completions",
-    )
-    llm._async_client.complete = mock.AsyncMock(
-        return_value=ChatCompletions(
-            choices=[
-                ChatChoice(
-                    message=ChatResponseMessage(
-                        content="Yes, this is a test.", role="assistant"
-                    )
-                )
-            ]
-        )
     )
     return llm
 
@@ -159,6 +178,68 @@ def test_achat_completion(
 
     assert response.message.role == MessageRole.ASSISTANT
     assert response.message.content.strip() == "Yes, this is a test."
+
+
+def test_achat_closes_async_client_context(
+    loop: asyncio.AbstractEventLoop,
+    test_params: dict,
+    azure_llm_async_fixture,
+):
+    """Ensures async client context manager is used for proper session cleanup."""
+    llm = azure_llm_async_fixture.llm
+    client_instance = azure_llm_async_fixture.client_instance
+    entered_client = client_instance.__aenter__.return_value
+    entered_client.complete = mock.AsyncMock(
+        return_value=ChatCompletions(
+            choices=[
+                ChatChoice(
+                    message=ChatResponseMessage(
+                        content="Yes, this is a test.", role="assistant"
+                    )
+                )
+            ]
+        )
+    )
+
+    response = loop.run_until_complete(llm.achat(**test_params))
+
+    assert response.message.content.strip() == "Yes, this is a test."
+    client_instance.__aenter__.assert_awaited_once()
+    client_instance.__aexit__.assert_awaited_once()
+
+
+def test_astream_chat_closes_async_client_context(
+    loop: asyncio.AbstractEventLoop,
+    test_params: dict,
+    azure_llm_async_fixture,
+):
+    """Ensures async streaming path uses and closes async client context."""
+    llm = azure_llm_async_fixture.llm
+    client_instance = azure_llm_async_fixture.client_instance
+    entered_client = client_instance.__aenter__.return_value
+
+    async def stream_response():
+        first_chunk = mock.Mock()
+        first_chunk.choices = [mock.Mock(delta=mock.Mock(content="Yes"))]
+        second_chunk = mock.Mock()
+        second_chunk.choices = [mock.Mock(delta=mock.Mock(content=", this is a test."))]
+        yield first_chunk
+        yield second_chunk
+
+    entered_client.complete = mock.AsyncMock(return_value=stream_response())
+
+    async def collect() -> str:
+        stream = await llm.astream_chat(**test_params)
+        buffer = ""
+        async for chunk in stream:
+            buffer += chunk.delta
+        return buffer
+
+    response = loop.run_until_complete(collect())
+
+    assert response == "Yes, this is a test."
+    client_instance.__aenter__.assert_awaited_once()
+    client_instance.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.skipif(
@@ -291,7 +372,8 @@ def test_chat_completion_gpt4o_api_version(test_params: dict):
 
 
 def test_get_metadata(test_llm: AzureAICompletionsModel, caplog):
-    """Tests if we can get model metadata back from the endpoint. If so,
+    """
+    Tests if we can get model metadata back from the endpoint. If so,
     model_name should not be 'unknown'. Some endpoints may not support this
     and in those cases a warning should be logged.
     """
@@ -301,3 +383,61 @@ def test_get_metadata(test_llm: AzureAICompletionsModel, caplog):
         response.model_name != "unknown"
         or "does not support model metadata retrieval" in caplog.text
     )
+
+
+def test_to_azure_tool_choice():
+    """Test that tool_required is correctly mapped to Azure's tool_choice parameter."""
+    llm = AzureAICompletionsModel(
+        endpoint="https://my-endpoint.inference.ai.azure.com",
+        credential="my-api-key",
+    )
+
+    # Test with tool_required=True
+    tool_choice = llm._to_azure_tool_choice(tool_required=True)
+    assert tool_choice == ChatCompletionsToolChoicePreset.REQUIRED
+
+    # Test with tool_required=False
+    tool_choice = llm._to_azure_tool_choice(tool_required=False)
+    assert tool_choice == ChatCompletionsToolChoicePreset.AUTO
+
+
+def search(query: str) -> str:
+    """Search for information about a query."""
+    return f"Results for {query}"
+
+
+search_tool = FunctionTool.from_defaults(
+    fn=search, name="search_tool", description="A tool for searching information"
+)
+
+
+def test_prepare_chat_with_tools_tool_required():
+    """Test that tool_required is correctly passed to the API request when True."""
+    llm = AzureAICompletionsModel(
+        endpoint="https://my-endpoint.inference.ai.azure.com",
+        credential="my-api-key",
+    )
+
+    # Test with tool_required=True
+    result = llm._prepare_chat_with_tools(tools=[search_tool], tool_required=True)
+
+    assert result["tool_choice"] == ChatCompletionsToolChoicePreset.REQUIRED
+    assert len(result["tools"]) == 1
+    assert result["tools"][0]["function"]["name"] == "search_tool"
+
+
+def test_prepare_chat_with_tools_tool_not_required():
+    """Test that tool_required is correctly passed to the API request when False."""
+    llm = AzureAICompletionsModel(
+        endpoint="https://my-endpoint.inference.ai.azure.com",
+        credential="my-api-key",
+    )
+
+    # Test with tool_required=False (default)
+    result = llm._prepare_chat_with_tools(
+        tools=[search_tool],
+    )
+
+    assert result["tool_choice"] == ChatCompletionsToolChoicePreset.AUTO
+    assert len(result["tools"]) == 1
+    assert result["tools"][0]["function"]["name"] == "search_tool"

@@ -1,140 +1,73 @@
-# 🚀 Contributing to LlamaIndex
+# Contributing to LlamaIndex
 
-Welcome to **LlamaIndex**! We’re excited that you want to contribute and become part of our growing community. Whether you're interested in building integrations, fixing bugs, or adding exciting new features, we've made it easy for you to get started.
+Welcome to **LlamaIndex**! We’re excited that you want to contribute and become part of our growing community. Whether
+you're interested in building integrations, fixing bugs, or adding exciting new features, we've made it easy for you to
+get started.
 
 ---
 
-## 🎯 Quick Start Guide
+## Quick Start Guide
+
+We use `uv` as the package and project manager for all the Python packages in this repository. Before contributing, make sure you have `uv` installed (see [installation guide](https://docs.astral.sh/uv/getting-started/installation/)).
 
 If you're ready to dive in, here’s a quick setup guide to get you going:
 
-1. **Fork** the repo and clone your fork.
-2. Navigate to the project folder:
-   ```bash
-   cd llama_index
-   ```
-3. Set up a new virtual environment with `Poetry`:
-   ```bash
-   poetry shell
-   ```
-4. Install development (and/or docs) dependencies:
-   ```bash
-   poetry install --only dev,docs --no-root
-   ```
-5. Install the package(s) you want to work on. You will for sure need to install `llama-index-core`:
+1. **Fork** the GitHub repo, clone your fork and open a terminal at the root of the git repository `llama_index`.
+2. At the root of the repo, run the following command to setup the global virtual environment we use for the pre-commit hooks and the linters:
 
-   ```bash
-   pip install -e llama-index-core
-   ```
+```bash
+uv sync
+```
 
-   From there, you can install specific integrations that you want to work on:
+Install `pre-commit` to run pre-commit hooks on each commit:
 
-   ```bash
-   pip install -e llama-index-integrations/llms/llama-index-llms-openai
-   ```
+```bash
+uv run pre-commit install
+```
 
-**That’s it!** If anything seems unclear, scroll down to the [Development Guidelines](#-Development-Guidelines) for more details.
+Whenever you make changes, make sure they comply with linting rules:
 
----
+```bash
+uv run make lint
+```
 
-## 🛠️ What Can You Work On?
+3. Navigate to the project folder you want to work on. For example, if you want to work on the OpenAI LLM integration:
 
-There’s plenty of ways to contribute—whether you’re a seasoned Python developer or just starting out, your contributions are welcome! Here are some ideas:
+```bash
+cd llama-index-integrations/llms/llama-index-llms-openai
+```
 
-### 1. 🆕 Extend Core Modules
+4. `uv` will take care of creating and setting up the virtual environment for the specific project you're working on. For example, to run the tests you can do:
 
-Help us extend LlamaIndex's functionality by contributing to any of our core modules. Think of this as unlocking new superpowers for LlamaIndex!
+```bash
+uv run -- pytest
+```
 
-- **New Integrations** (e.g., connecting new LLMs, storage systems, or data sources)
-- **Data Loaders**, **Vector Stores**, and more!
+**That’s it!** The package you're working on is already installed in editable mode, so you can go on, change the code and run the tests!
 
-Explore the different modules below to get inspired!
-
-New integrations should meaningfully integrate with existing LlamaIndex framework components. At the discretion of LlamaIndex maintainers, some integrations may be declined.
-
-### 2. 📦 Contribute Tools, Readers, Packs, or Datasets
-
-Create new Packs, Readers, or Tools that simplify how others use LlamaIndex with various platforms.
-
-### 3. 🧠 Add New Features
-
-Have an idea for a feature that could make LlamaIndex even better? Go for it! We love innovative contributions.
-
-### 4. 🐛 Fix Bugs
-
-Fixing bugs is a great way to start contributing. Head over to our [Github Issues](https://github.com/run-llama/llama_index/issues) page and find bugs tagged as [`good first issue`](https://github.com/run-llama/llama_index/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22).
-
-### 5. 🎉 Share Usage Examples
-
-If you’ve used LlamaIndex in a unique or creative way, consider sharing guides or notebooks. This helps other developers learn from your experience.
-
-### 6. 🧪 Experiment
-
-Got an out-there idea? We’re open to experimental features—test it out and make a PR!
-
-### 7. 📄 Improve Documentation & Code Quality
-
-Help make the project easier to navigate by refining the docs or cleaning up the codebase. Every improvement counts!
+Once you get familiar with the project, scroll down to the [Development Guidelines](#-Development-Guidelines) for more details.
 
 ---
 
-## 🔥 How to Extend LlamaIndex’s Core Modules
+## What can you work on?
 
-### Data Loaders
+We suggest working on:
 
-A **data loader** ingests data from any source and converts it into `Document` objects that LlamaIndex can parse and index.
+- Core modules (`llama-index-core` and `llama-index-instrumentation`), contributing with refactoring, bug fixes and extensions
+- Documentation (`docs`), helping us improve our current docs and keep them updated.
+- Main integrations, such as `llama-index-llms`, `llama-index-embeddings` or `llama-index-vector-stores`, providing help with maintaining them
+  While we welcome contributions, **we are no longer accepting new integration packages** in this repository. New integrations should be maintained in their own repositories and published to PyPI independently. PRs that add a new `pyproject.toml` will be automatically closed.
 
-- **Interface**:
-  - `load_data`: Returns a list of `Document` objects.
-  - `lazy_load_data`: Returns an iterable of `Document` objects (useful for large datasets).
+We also do not recommend working on these areas:
 
-**Example**: [MongoDB Reader](https://github.com/run-llama/llama_index/tree/main/llama-index-integrations/readers/llama-index-readers-mongodb)
-
-💡 **Ideas**: Want to load data from a source not yet supported? Build a new data loader and submit a PR!
-
-### Node Parsers
-
-A **node parser** converts `Document` objects into `Node` objects—atomic chunks of data that LlamaIndex works with.
-
-- **Interface**:
-  - `get_nodes_from_documents`: Returns a list of `Node` objects.
-
-**Example**: [Hierarchical Node Parser](https://github.com/run-llama/llama_index/blob/main/llama-index-core/llama_index/core/node_parser/relational/hierarchical.py)
-
-💡 **Ideas**: Add new ways to structure hierarchical relationships in documents, like play-act-scene or chapter-section formats.
-
-### Text Splitters
-
-A **text splitter** breaks down large text blocks into smaller chunks—this is key for working with LLMs that have limited context windows.
-
-- **Interface**:
-  - `split_text`: Takes a string and returns smaller strings (chunks).
-
-**Example**: [Token Text Splitter](https://github.com/run-llama/llama_index/blob/main/llama-index-core/llama_index/core/node_parser/text/token.py)
-
-💡 **Ideas**: Build specialized text splitters for different content types, like code, dialogues, or dense data!
-
-### Vector Stores
-
-Store embeddings and retrieve them via similarity search with **vector stores**.
-
-- **Interface**:
-  - `add`, `delete`, `query`, `get_nodes`, `delete_nodes`, `clear`
-
-**Example**: [Pinecone Vector Store](https://github.com/run-llama/llama_index/tree/main/llama-index-integrations/vector_stores/llama-index-vector-stores-pinecone)
-
-💡 **Ideas**: Create support for vector databases that aren't yet integrated!
-
-### Query Engines & Retrievers
-
-- **Query Engines** implement `query` to return structured responses.
-- **Retrievers** retrieve relevant nodes based on queries.
-
-💡 **Ideas**: Design fancy query engines that combine retrievers or add intelligent processing layers!
+- Experimental features (`llama-index-experimental`)
+- Packs (`llama-index-packs`)
+- Finetuning (`llama-index-finetuning`)
+- CLI (`llama-index-cli`)
 
 ---
 
-## ✨ Steps to Contribute
+## Steps to Contribute
 
 1. **Fork** the repository on GitHub.
 2. **Clone** your fork to your local machine.
@@ -145,7 +78,7 @@ Store embeddings and retrieve them via similarity search with **vector stores**.
    ```bash
    git checkout -b your-feature-branch
    ```
-4. **Set up your environment** (follow the [Quick Start Guide](#quick-start-guide)).
+4. **Set up your environment** (follow the [Quick Start Guide](#-quick-start-guide)).
 5. **Work on your feature or bugfix**, ensuring you have unit tests covering your code.
 6. **Commit** your changes, then push them to your fork.
    ```bash
@@ -153,11 +86,9 @@ Store embeddings and retrieve them via similarity search with **vector stores**.
    ```
 7. **Open a pull request** on GitHub.
 
-And voilà—your contribution is ready for review!
-
 ---
 
-## 🧑‍💻 Development Guidelines
+## Development Guidelines
 
 ### Repo Structure
 
@@ -166,47 +97,48 @@ LlamaIndex is organized as a **monorepo**, meaning different packages live withi
 - **Core package**: [`llama-index-core/`](https://github.com/run-llama/llama_index/tree/main/llama-index-core)
 - **Integrations**: e.g., [`llama-index-integrations/`](https://github.com/run-llama/llama_index/tree/main/llama-index-integrations)
 
-### Setting Up Your Environment
-
-1. **Install Poetry** (if you don’t already have it):
-   ```bash
-   curl -sSL https://install.python-poetry.org | python3 -
-   ```
-2. Install the Poetry shell plugin (if you don't already have it):
-   ```bash
-   poetry self add poetry-plugin-shell
-   ```
-3. Activate the environment:
-   ```bash
-   poetry shell
-   ```
-4. Install dependencies:
-   ```bash
-   poetry install --only dev,docs --no-root
-   ```
-5. Install the package(s) you want to work on. You will for sure need to install `llama-index-core`:
-
-   ```bash
-   pip install -e llama-index-core
-   ```
-
-   From there, you can install specific integrations that you want to work on:
-
-   ```bash
-   pip install -e llama-index-integrations/llms/llama-index-llms-openai
-   ```
-
 ### Running Tests
 
 We use `pytest` for testing. Make sure you run tests in each package you modify:
 
 ```bash
-pytest
+uv run -- pytest
 ```
 
 If you’re integrating with a remote system, **mock** it to prevent test failures from external changes.
 
-By default, CICD will fail if test coverage is less than 50% -- so please do add tests for your code!
+By default, CI/CD will fail if test coverage is less than 50%, so make sure your packages or changes are covered by tests.
+
+---
+
+## How to Use AI when Contributing
+
+We welcome AI-assisted contributions, but we ask you to follow some core principles and guidelines that can help make the contribution and review process smoother for both you and us maintainers.
+
+### Core Principles
+
+- **Transparency**: highlight when and where you used AI to generate code, and explain how you verified and validated it
+- **Accountability**: we require human oversight for every contribution, and we hold human developers accountable for their changes: in this sense, it is best if you don't propose changes you don't understand or cannot maintain
+- **Quality**: AI code should meet the same quality standards as human code: this means being documented, tested, and following existing patterns
+
+### Guidelines
+
+**Use for**
+
+- refactors of existing code, writing boilerplate or repetitive patterns, create tests
+- improving existing documentation, or to write concise explanatory comments
+- helpers and utilities
+
+**Avoid for**
+
+- complex code changes (without thoroughly reviewing what AI produced)
+- core architectural changes
+- excessively large code changes. Despite the fact that AI can create thousands of lines of code in a relatively small amount of time, reviewing large code changes takes much longer and much more energy from us maintainers
+- creating code you don't understand or cannot maintain long-term
+- repetitive, self-explanatory or excessively long comments, docstrings or documentation
+- secrets handling or security-related code
+
+Overall, our suggestion is use AI by starting with **small changes**, validating often, making sure tests pass and quality criteria are met, and build incrementally.
 
 ---
 

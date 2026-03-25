@@ -24,11 +24,14 @@ def remove_empty_values(input_dict):
     """
     Remove entries with empty values from the dictionary.
 
-    Parameters:
+    Parameters
+    ----------
     input_dict (dict): The dictionary from which empty values need to be removed.
 
-    Returns:
+    Returns
+    -------
     dict: A new dictionary with all empty values removed.
+
     """
     # Create a new dictionary excluding empty values
     return {key: value for key, value in input_dict.items() if value}
@@ -46,7 +49,7 @@ VECTOR_INDEX_NAME = "entity"
 LONG_TEXT_THRESHOLD = 52
 
 node_properties_query = """
-CALL apoc.meta.data()
+CALL apoc.meta.data($config)
 YIELD label, other, elementType, type, property
 WHERE NOT type = "RELATIONSHIP" AND elementType = "node"
   AND NOT label IN $EXCLUDED_LABELS
@@ -56,7 +59,7 @@ RETURN {labels: nodeLabels, properties: properties} AS output
 """
 
 rel_properties_query = """
-CALL apoc.meta.data()
+CALL apoc.meta.data($config)
 YIELD label, other, elementType, type, property
 WHERE NOT type = "RELATIONSHIP" AND elementType = "relationship"
       AND NOT label in $EXCLUDED_LABELS
@@ -65,7 +68,7 @@ RETURN {type: nodeLabels, properties: properties} AS output
 """
 
 rel_query = """
-CALL apoc.meta.data()
+CALL apoc.meta.data($config)
 YIELD label, other, elementType, type, property
 WHERE type = "RELATIONSHIP" AND elementType = "node"
 UNWIND other AS other_node
@@ -117,6 +120,9 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
         timeout (Optional[float]): The timeout for transactions in seconds.
         Useful for terminating long-running queries.
         By default, there is no timeout set.
+        apoc_sample (Optional[int]): The number of nodes/rels to sample when calling
+        apoc.meta.data(). Useful for large databases where schema introspection
+        is slow. When None (default), no sampling config is passed.
 
     Examples:
         `pip install llama-index-graph-stores-neo4j`
@@ -142,6 +148,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
         # Close the neo4j connection explicitly.
         graph_store.close()
         ```
+
     """
 
     supports_structured_queries: bool = True
@@ -159,20 +166,27 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
         enhanced_schema: bool = False,
         create_indexes: bool = True,
         timeout: Optional[float] = None,
+        user_agent: str = "LLAMAINDEX-PROPERTYGRAPH",
+        apoc_sample: Optional[int] = None,
         **neo4j_kwargs: Any,
     ) -> None:
         self.sanitize_query_output = sanitize_query_output
         self.enhanced_schema = enhanced_schema
+        self._apoc_meta_config = (
+            {"sample": apoc_sample} if apoc_sample is not None else {}
+        )
         self._driver = neo4j.GraphDatabase.driver(
             url,
             auth=(username, password),
             notifications_min_severity="OFF",
+            user_agent=user_agent,
             **neo4j_kwargs,
         )
         self._async_driver = neo4j.AsyncGraphDatabase.driver(
             url,
             auth=(username, password),
             notifications_min_severity="OFF",
+            user_agent=user_agent,
             **neo4j_kwargs,
         )
         self._database = database
@@ -215,7 +229,8 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                     *EXCLUDED_LABELS,
                     BASE_ENTITY_LABEL,
                     BASE_NODE_LABEL,
-                ]
+                ],
+                "config": self._apoc_meta_config,
             },
         )
         node_properties = (
@@ -223,7 +238,11 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
         )
 
         rels_query_result = self.structured_query(
-            rel_properties_query, param_map={"EXCLUDED_LABELS": EXCLUDED_RELS}
+            rel_properties_query,
+            param_map={
+                "EXCLUDED_LABELS": EXCLUDED_RELS,
+                "config": self._apoc_meta_config,
+            },
         )
         rel_properties = (
             [el["output"] for el in rels_query_result] if rels_query_result else []
@@ -236,7 +255,8 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                     *EXCLUDED_LABELS,
                     BASE_ENTITY_LABEL,
                     BASE_NODE_LABEL,
-                ]
+                ],
+                "config": self._apoc_meta_config,
             },
         )
         relationships = (
@@ -492,7 +512,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
         WITH e
         CALL (e) {{
             WITH e
-            MATCH (e)-[r{':`' + '`|`'.join(relation_names) + '`' if relation_names else ''}]->(t:`{BASE_ENTITY_LABEL}`)
+            MATCH (e)-[r{":`" + "`|`".join(relation_names) + "`" if relation_names else ""}]->(t:`{BASE_ENTITY_LABEL}`)
             RETURN e.name AS source_id, [l in labels(e) WHERE NOT l IN ['{BASE_ENTITY_LABEL}', '{BASE_NODE_LABEL}'] | l][0] AS source_type,
                    e{{.* , embedding: Null, name: Null}} AS source_properties,
                    type(r) AS type,
@@ -501,7 +521,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                    t{{.* , embedding: Null, name: Null}} AS target_properties
             UNION ALL
             WITH e
-            MATCH (e)<-[r{':`' + '`|`'.join(relation_names) + '`' if relation_names else ''}]-(t:`{BASE_ENTITY_LABEL}`)
+            MATCH (e)<-[r{":`" + "`|`".join(relation_names) + "`" if relation_names else ""}]-(t:`{BASE_ENTITY_LABEL}`)
             RETURN t.name AS source_id, [l in labels(t) WHERE NOT l IN ['{BASE_ENTITY_LABEL}', '{BASE_NODE_LABEL}'] | l][0] AS source_type,
                    t{{.* , embedding: Null, name: Null}} AS source_properties,
                    type(r) AS type,
@@ -951,7 +971,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                             example = (
                                 (
                                     "Available options: "
-                                    f'{[clean_string_values(el) for el in prop["values"]]}'
+                                    f"{[clean_string_values(el) for el in prop['values']]}"
                                 )
                                 if prop["values"]
                                 else ""
@@ -970,7 +990,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                         "LOCAL_DATE_TIME",
                     ]:
                         if prop.get("min") is not None:
-                            example = f'Min: {prop["min"]}, Max: {prop["max"]}'
+                            example = f"Min: {prop['min']}, Max: {prop['max']}"
                         else:
                             example = (
                                 f'Example: "{prop["values"][0]}"'
@@ -982,10 +1002,10 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                         # if not prop.get("min_size") or prop["min_size"] > LIST_LIMIT:
                         #    continue
                         example = (
-                            f'Min Size: {prop.get("min_size", "N/A")}, '
-                            f'Max Size: {prop.get("max_size", "N/A")}, '
+                            f"Min Size: {prop.get('min_size', 'N/A')}, "
+                            f"Max Size: {prop.get('max_size', 'N/A')}, "
                             + (
-                                f'Example: [{prop["values"][0]}]'
+                                f"Example: [{prop['values'][0]}]"
                                 if prop.get("values") and len(prop["values"]) > 0
                                 else ""
                             )
@@ -1010,7 +1030,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                             example = (
                                 (
                                     "Available options: "
-                                    f'{[clean_string_values(el) for el in prop["values"]]}'
+                                    f"{[clean_string_values(el) for el in prop['values']]}"
                                 )
                                 if prop.get("values")
                                 else ""
@@ -1023,7 +1043,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                         "LOCAL_DATE_TIME",
                     ]:
                         if prop.get("min"):  # If we have min/max
-                            example = f'Min: {prop["min"]}, Max:  {prop["max"]}'
+                            example = f"Min: {prop['min']}, Max:  {prop['max']}"
                         else:  # return a single value
                             example = (
                                 f'Example: "{prop["values"][0]}"'
@@ -1034,7 +1054,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                         # Skip embeddings
                         if prop["min_size"] > LIST_LIMIT:
                             continue
-                        example = f'Min Size: {prop["min_size"]}, Max Size: {prop["max_size"]}'
+                        example = f"Min Size: {prop['min_size']}, Max Size: {prop['max_size']}"
                     formatted_rel_props.append(
                         f"  - `{prop['property']}: {prop['type']}` {example}"
                     )
@@ -1115,6 +1135,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
 
         Returns:
             Neo4jPropertyGraphStore: The current graph connection instance
+
         """
         return self
 
@@ -1140,6 +1161,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
 
         Note:
             Any exception is re-raised after the connection is closed.
+
         """
         self.close()
 
@@ -1164,6 +1186,7 @@ class Neo4jPropertyGraphStore(PropertyGraphStore):
                    ...
                finally:
                    graph.close()
+
         """
         try:
             self.close()

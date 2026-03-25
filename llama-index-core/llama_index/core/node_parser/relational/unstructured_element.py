@@ -16,7 +16,8 @@ from llama_index.core.node_parser.relational.utils import html_to_df
 
 
 class UnstructuredElementNodeParser(BaseElementNodeParser):
-    """Unstructured element node parser.
+    """
+    Unstructured element node parser.
 
     Splits a document into Text Nodes and Index Nodes corresponding to embedded objects
     (e.g. tables).
@@ -62,9 +63,10 @@ class UnstructuredElementNodeParser(BaseElementNodeParser):
         elements = self.extract_elements(
             node.get_content(), table_filters=[self.filter_table]
         )
-        table_elements = self.get_table_elements(elements)
         # extract summaries over table elements
-        self.extract_table_summaries(table_elements)
+        # Pass all elements so that extract_table_summaries can access
+        # surrounding context (e.g., table titles) for better summarization
+        self.extract_table_summaries(elements)
         # convert into nodes
         # will return a list of Nodes and Index Nodes
         nodes = self.get_nodes_from_elements(
@@ -82,9 +84,10 @@ class UnstructuredElementNodeParser(BaseElementNodeParser):
         elements = self.extract_elements(
             node.get_content(), table_filters=[self.filter_table]
         )
-        table_elements = self.get_table_elements(elements)
         # extract summaries over table elements
-        await self.aextract_table_summaries(table_elements)
+        # Pass all elements so that extract_table_summaries can access
+        # surrounding context (e.g., table titles) for better summarization
+        await self.aextract_table_summaries(elements)
         # convert into nodes
         # will return a list of Nodes and Index Nodes
         nodes = self.get_nodes_from_elements(

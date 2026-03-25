@@ -18,6 +18,7 @@ from llama_index.core.vector_stores.types import (
     MetadataFilter,
     MetadataFilters,
     VectorStoreQuery,
+    VectorStoreQueryMode,
 )
 
 ##
@@ -26,7 +27,7 @@ from llama_index.core.vector_stores.types import (
 # docker-compose up
 #
 # Run tests
-# pytest test_opensearch_client.py
+# uv run -- pytest test_opensearch_client.py
 
 logging.basicConfig(level=logging.DEBUG)
 evt_loop = asyncio.get_event_loop()
@@ -84,8 +85,7 @@ def os_store(index_name: str) -> Generator[OpensearchVectorStore, None, None]:
     # delete index
     client._os_client.indices.delete(index=index_name)
     # close client
-    client._os_client.close()
-    client._os_async_client.close()
+    client.close()
 
 
 @pytest.fixture()
@@ -110,8 +110,7 @@ def os_stores() -> Generator[List[OpensearchVectorStore], None, None]:
         # delete index
         client._os_client.indices.delete(index=client._index)
         # close client
-        client._os_client.close()
-        client._os_async_client.close()
+        client.close()
 
 
 @pytest.fixture(scope="session")
@@ -241,7 +240,7 @@ def test_functionality(
         assert count_docs_in_index(os_store) == len(node_embeddings) - 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
 async def test_async_functionality(
     os_stores: List[OpensearchVectorStore], node_embeddings: List[TextNode]
@@ -291,7 +290,7 @@ def test_delete_nodes(
         assert "ccc" in res.ids
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
 async def test_adelete_nodes(
     os_stores: List[OpensearchVectorStore], node_embeddings_2: List[TextNode]
@@ -421,7 +420,7 @@ def test_clear(
         assert len(res.ids) == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
 async def test_aclear(
     os_stores: List[OpensearchVectorStore], node_embeddings_2: List[TextNode]
@@ -656,7 +655,8 @@ def test_filter_text_match(
     os_stores: List[OpensearchVectorStore],
     insert_document,
 ):
-    """Test that OpensearchVectorStore correctly applies FilterOperator.TEXT_MATCH in filters. Also tests that
+    """
+    Test that OpensearchVectorStore correctly applies FilterOperator.TEXT_MATCH in filters. Also tests that
     fuzzy matching works as intended.
     """
     for os_store in os_stores:
@@ -684,8 +684,44 @@ def test_filter_text_match(
 
 
 @pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
+def test_filter_text_match_insensitive(
+    os_stores: List[OpensearchVectorStore],
+    insert_document,
+) -> None:
+    """
+    Test that OpensearchVectorStore correctly applies FilterOperator.TEXT_MATCH_INSENSITIVE
+    in filters. This should behave similarly to TEXT_MATCH for typical text analyzers.
+    """
+    for os_store in os_stores:
+        for metadata, id_ in [
+            ({"name": "John Doe"}, "match1"),
+            ({"name": "Doe John Johnson"}, "match2"),
+            ({"name": "Johnny Doe"}, "match3"),
+            ({"name": "Mary Sue"}, "nomatch"),
+        ]:
+            insert_document(os_store, doc_id=id_, metadata=metadata)
+
+        query = _get_sample_vector_store_query(
+            filters=MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="name",
+                        value="john doe",
+                        operator=FilterOperator.TEXT_MATCH_INSENSITIVE,
+                    )
+                ]
+            )
+        )
+        query_result = os_store.query(query)
+
+        doc_ids = {node.id_ for node in query_result.nodes}
+        assert doc_ids == {"match1", "match2", "match3"}
+
+
+@pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
 def test_filter_contains(os_stores: List[OpensearchVectorStore], insert_document):
-    """Test that OpensearchVectorStore correctly applies FilterOperator.CONTAINS in filters. Should only match
+    """
+    Test that OpensearchVectorStore correctly applies FilterOperator.CONTAINS in filters. Should only match
     exact substring matches.
     """
     for os_store in os_stores:
@@ -709,6 +745,36 @@ def test_filter_contains(os_stores: List[OpensearchVectorStore], insert_document
 
         doc_ids = {node.id_ for node in query_result.nodes}
         assert doc_ids == {"match1", "match2"}
+
+
+@pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
+def test_filter_is_empty(os_stores: List[OpensearchVectorStore], insert_document):
+    """
+    Test that OpensearchVectorStore correctly applies FilterOperator.IS_EMPTY in filters. Should only match
+    documents where the specified field doesn't exist.
+    """
+    for os_store in os_stores:
+        for metadata, id_ in [
+            ({"author": "John Doe", "category": "fiction"}, "has_author"),
+            ({"category": "non-fiction", "year": 2023}, "no_author1"),
+            ({"year": 2022, "publisher": "ABC Books"}, "no_author2"),
+            ({}, "no_author3"),
+        ]:
+            insert_document(os_store, doc_id=id_, metadata=metadata)
+
+        query = _get_sample_vector_store_query(
+            filters=MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="author", value=None, operator=FilterOperator.IS_EMPTY
+                    )
+                ]
+            )
+        )
+        query_result = os_store.query(query)
+
+        doc_ids = {node.id_ for node in query_result.nodes}
+        assert doc_ids == {"no_author1", "no_author2", "no_author3"}
 
 
 @pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
@@ -788,7 +854,8 @@ def test_filter_nested(
 def test_filter_array_of_strings(
     os_stores: List[OpensearchVectorStore], insert_document
 ):
-    """Test that OpensearchVectorStore correctly applies Filter.Operator.IN filters
+    """
+    Test that OpensearchVectorStore correctly applies Filter.Operator.IN filters
     when the filter value is an array of strings. Should only match all members
     of the input array exist in the field.
     """
@@ -850,3 +917,216 @@ def test_efficient_filtering_used_when_enabled(os_stores: List[OpensearchVectorS
             embedding_field="embedding", query_embedding=[1], k=20, filters=filters
         )
         assert patched_default_approximate_search_query.called
+
+
+@pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
+@pytest.mark.parametrize(
+    "query_mode",
+    [
+        VectorStoreQueryMode.DEFAULT,
+        VectorStoreQueryMode.TEXT_SEARCH,
+        VectorStoreQueryMode.HYBRID,
+    ],
+)
+def test_excluded_source_fields(
+    os_stores: List[OpensearchVectorStore],
+    node_embeddings: List[TextNode],
+    query_mode: VectorStoreQueryMode,
+):
+    os_store = os_stores[0]
+    os_store.add(node_embeddings)
+    os_store.client._search_pipeline = "search_pipeline"  # value doesn't matter
+
+    # set excluded source fields
+    excluded_fields = ["embedding"]
+    os_store.client._excluded_source_fields = excluded_fields
+
+    with mock.patch.object(os_store.client._os_client, "search") as patched_search:
+        exp_node = node_embeddings[3]
+        query = VectorStoreQuery(
+            query_embedding=exp_node.embedding,
+            similarity_top_k=1,
+            mode=query_mode,
+            query_str=exp_node.text,
+        )
+        os_store.query(query)
+        assert patched_search.called
+
+        kwargs = patched_search.call_args.kwargs
+        body = kwargs["body"]
+        assert "_source" in body
+        assert "exclude" in body["_source"]
+        assert body["_source"]["exclude"] == excluded_fields
+
+    kwargs.pop("params", None)  # params not needed, even when testing hybrid
+    res = os_store.client._os_client.search(params=None, **kwargs)
+    assert len(res["hits"]["hits"]) > 0
+    for hit in res["hits"]["hits"]:
+        source = hit["_source"]
+        for ex in excluded_fields:
+            assert ex not in source
+
+
+@pytest.mark.skipif(opensearch_not_available, reason="opensearch is not available")
+@pytest.mark.parametrize(
+    "query_mode",
+    [
+        VectorStoreQueryMode.DEFAULT,
+        VectorStoreQueryMode.TEXT_SEARCH,
+        VectorStoreQueryMode.HYBRID,
+    ],
+)
+def test_no_excluded_source_fields(
+    os_stores: List[OpensearchVectorStore],
+    node_embeddings: List[TextNode],
+    query_mode: VectorStoreQueryMode,
+) -> None:
+    os_store = os_stores[0]
+    os_store.add(node_embeddings)
+    os_store.client._search_pipeline = "search_pipeline"  # value doesn't matter
+
+    # explicitly show `None` for excluded source fields (default)
+    os_store.client._excluded_source_fields = None
+
+    with mock.patch.object(os_store.client._os_client, "search") as patched_search:
+        exp_node = node_embeddings[3]
+        query = VectorStoreQuery(
+            query_embedding=exp_node.embedding,
+            similarity_top_k=1,
+            mode=query_mode,
+            query_str=exp_node.text,
+        )
+        os_store.query(query)
+        assert patched_search.called
+
+        body = patched_search.call_args.kwargs["body"]
+        assert "_source" not in body
+
+
+def _make_client_with_mocks(owns_sync=True, owns_async=True):
+    """Helper to create an OpensearchVectorClient with mock underlying clients."""
+    mock_sync_client = mock.MagicMock()
+    mock_async_client = mock.MagicMock()
+    mock_async_client.close = mock.AsyncMock()
+
+    client = OpensearchVectorClient.__new__(OpensearchVectorClient)
+    client._os_client = mock_sync_client
+    client._os_async_client = mock_async_client
+    client._owns_os_client = owns_sync
+    client._owns_os_async_client = owns_async
+
+    return client, mock_sync_client, mock_async_client
+
+
+def test_close_calls_underlying_clients() -> None:
+    """Test that OpensearchVectorClient.close() calls close on both owned clients."""
+    client, mock_sync, mock_async = _make_client_with_mocks()
+
+    client.close()
+
+    mock_sync.close.assert_called_once()
+    mock_async.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_aclose_calls_underlying_clients() -> None:
+    """Test that OpensearchVectorClient.aclose() calls close on both owned clients."""
+    client, mock_sync, mock_async = _make_client_with_mocks()
+
+    await client.aclose()
+
+    mock_sync.close.assert_called_once()
+    mock_async.close.assert_called_once()
+
+
+def test_close_respects_ownership() -> None:
+    """Test that close() does not close externally-provided clients."""
+    client, mock_sync, mock_async = _make_client_with_mocks(
+        owns_sync=False, owns_async=False
+    )
+
+    client.close()
+
+    mock_sync.close.assert_not_called()
+    mock_async.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_aclose_respects_ownership() -> None:
+    """Test that aclose() does not close externally-provided clients."""
+    client, mock_sync, mock_async = _make_client_with_mocks(
+        owns_sync=False, owns_async=False
+    )
+
+    await client.aclose()
+
+    mock_sync.close.assert_not_called()
+    mock_async.close.assert_not_called()
+
+
+def test_del_calls_close() -> None:
+    """Test that __del__ triggers close() on OpensearchVectorClient."""
+    client, mock_sync, mock_async = _make_client_with_mocks()
+
+    client.__del__()
+
+    mock_sync.close.assert_called_once()
+
+
+def test_del_suppresses_exceptions() -> None:
+    """Test that __del__ doesn't propagate errors."""
+    client, mock_sync, mock_async = _make_client_with_mocks()
+    mock_sync.close.side_effect = RuntimeError("connection lost")
+
+    # Should not raise
+    client.__del__()
+
+
+def test_store_close_calls_client_close() -> None:
+    """Test that OpensearchVectorStore.close() calls close on the underlying client."""
+    mock_client = mock.MagicMock(spec=OpensearchVectorClient)
+
+    store = OpensearchVectorStore.__new__(OpensearchVectorStore)
+    store._client = mock_client
+
+    store.close()
+
+    mock_client.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_store_aclose_calls_client_aclose() -> None:
+    """Test that OpensearchVectorStore.aclose() calls aclose on the underlying client."""
+    mock_client = mock.MagicMock(spec=OpensearchVectorClient)
+    mock_client.aclose = mock.AsyncMock()
+
+    store = OpensearchVectorStore.__new__(OpensearchVectorStore)
+    store._client = mock_client
+
+    await store.aclose()
+
+    mock_client.aclose.assert_called_once()
+
+
+def test_store_del_calls_close() -> None:
+    """Test that __del__ on OpensearchVectorStore triggers close()."""
+    mock_client = mock.MagicMock(spec=OpensearchVectorClient)
+
+    store = OpensearchVectorStore.__new__(OpensearchVectorStore)
+    store._client = mock_client
+
+    store.__del__()
+
+    mock_client.close.assert_called_once()
+
+
+def test_store_del_suppresses_exceptions() -> None:
+    """Test that __del__ on OpensearchVectorStore doesn't propagate errors."""
+    mock_client = mock.MagicMock(spec=OpensearchVectorClient)
+    mock_client.close.side_effect = RuntimeError("connection lost")
+
+    store = OpensearchVectorStore.__new__(OpensearchVectorStore)
+    store._client = mock_client
+
+    # Should not raise
+    store.__del__()

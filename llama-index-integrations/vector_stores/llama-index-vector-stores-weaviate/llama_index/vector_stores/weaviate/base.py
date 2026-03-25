@@ -1,4 +1,5 @@
-"""Weaviate Vector store index.
+"""
+Weaviate Vector store index.
 
 An index that is built on top of an existing vector store.
 
@@ -76,8 +77,67 @@ def _transform_weaviate_filter_operator(operator: str) -> str:
         raise ValueError(f"Filter operator {operator} not supported")
 
 
+# Canonical string representations accepted as boolean True / False.
+_BOOL_TRUE_STRINGS = frozenset({"true", "1", "yes"})
+_BOOL_FALSE_STRINGS = frozenset({"false", "0", "no"})
+
+
+def _parse_bool(value: Any) -> bool:
+    """
+    Parse a value to bool with explicit string handling.
+
+    Plain ``bool("false")`` returns ``True`` (any non-empty string is truthy).
+    This helper recognises common string representations so that e.g.
+    ``"false"`` is correctly coerced to ``False``.
+    """
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in _BOOL_TRUE_STRINGS:
+            return True
+        if lower in _BOOL_FALSE_STRINGS:
+            return False
+        raise ValueError(f"Cannot convert string '{value}' to bool")
+    return bool(value)
+
+
+def _coerce_filter_value(value: Any, data_type: Any) -> Any:
+    """
+    Coerce a filter value to match the expected Weaviate property data type.
+
+    The Weaviate v4 client maps Python types strictly to wire types:
+    int -> valueInt, float -> valueNumber, str -> valueText.
+    This causes errors when e.g. a Python int is used for a Weaviate 'number'
+    field, or a numeric string is used where the schema expects 'text'.
+    This function coerces the value to match the schema's expected data type.
+    """
+    if value is None:
+        return value
+    dt = data_type.value if hasattr(data_type, "value") else str(data_type)
+    try:
+        if dt in ("text", "text[]"):
+            if isinstance(value, list):
+                return [str(v) for v in value]
+            return str(value)
+        elif dt in ("number", "number[]"):
+            if isinstance(value, list):
+                return [float(v) for v in value]
+            return float(value)
+        elif dt in ("int", "int[]"):
+            if isinstance(value, list):
+                return [int(v) for v in value]
+            return int(value)
+        elif dt in ("boolean", "boolean[]"):
+            if isinstance(value, list):
+                return [_parse_bool(v) for v in value]
+            return _parse_bool(value)
+    except (ValueError, TypeError):
+        pass
+    return value
+
+
 def _to_weaviate_filter(
     standard_filters: MetadataFilters,
+    property_types: Optional[Dict[str, Any]] = None,
 ) -> Union[wvc.query.Filter, List[wvc.query.Filter]]:
     filters_list = []
     condition = standard_filters.condition or "and"
@@ -86,7 +146,7 @@ def _to_weaviate_filter(
     if standard_filters.filters:
         for filter in standard_filters.filters:
             if isinstance(filter, MetadataFilters):
-                filters_list.append(_to_weaviate_filter(filter))
+                filters_list.append(_to_weaviate_filter(filter, property_types))
                 continue
 
             property_filter = getattr(
@@ -98,6 +158,8 @@ def _to_weaviate_filter(
             # boolean is expected (True meaning the value actually being null / not set / empty)
             if filter.operator == "is_empty":
                 value = True
+            elif property_types and filter.key in property_types:
+                value = _coerce_filter_value(value, property_types[filter.key])
             filters_list.append(property_filter(value))
     else:
         return {}
@@ -110,7 +172,8 @@ def _to_weaviate_filter(
 
 
 class WeaviateVectorStore(BasePydanticVectorStore):
-    """Weaviate vector store.
+    """
+    Weaviate vector store.
 
     In this vector store, embeddings and docs are stored within a
     Weaviate collection.
@@ -142,6 +205,7 @@ class WeaviateVectorStore(BasePydanticVectorStore):
             weaviate_client=client, index_name="LlamaIndex"
         )
         ```
+
     """
 
     stores_text: bool = True
@@ -156,10 +220,9 @@ class WeaviateVectorStore(BasePydanticVectorStore):
     _aclient: weaviate.WeaviateAsyncClient = PrivateAttr()
 
     _collection_initialized: bool = PrivateAttr()
-    _is_self_created_weaviate_client: bool = (
-        PrivateAttr()
-    )  # States if the Weaviate client was created within this class and therefore closing it lies in our responsibility
+    _is_self_created_weaviate_client: bool = PrivateAttr()  # States if the Weaviate client was created within this class and therefore closing it lies in our responsibility
     _custom_batch: Optional[BatchWrapper] = PrivateAttr()
+    _property_types: Optional[Dict[str, Any]] = PrivateAttr()
 
     def __init__(
         self,
@@ -224,6 +287,8 @@ class WeaviateVectorStore(BasePydanticVectorStore):
                 "client_kwargs['custom_batch'] must be an instance of client.batch.dynamic() or client.batch.fixed_size()"
             )
 
+        self._property_types = None
+
         # create default schema if does not exist
         if self._client is not None:
             if not class_schema_exists(self._client, index_name):
@@ -255,12 +320,59 @@ class WeaviateVectorStore(BasePydanticVectorStore):
             raise AsyncClientNotProvidedError
         return self._aclient
 
+    def _get_property_types(self) -> Dict[str, Any]:
+        """
+        Get property name to data type mapping from the collection schema.
+
+        The mapping is cached after the first fetch. This is used to coerce
+        filter values to match the schema's expected data types, preventing
+        type mismatches (e.g. int vs number, numeric string vs text).
+        """
+        if self._property_types is None:
+            try:
+                collection = self.client.collections.get(self.index_name)
+                config = collection.config.get()
+                self._property_types = {
+                    prop.name: prop.data_type for prop in config.properties
+                }
+            except Exception as e:
+                _logger.warning(
+                    "Failed to fetch property types for collection "
+                    f"'{self.index_name}': {e}. Filter value coercion will "
+                    "be skipped for this call and retried on the next."
+                )
+                return {}
+        return self._property_types
+
+    async def _aget_property_types(self) -> Dict[str, Any]:
+        """
+        Get property name to data type mapping from the collection schema (async).
+
+        The mapping is cached after the first fetch.
+        """
+        if self._property_types is None:
+            try:
+                collection = self.async_client.collections.get(self.index_name)
+                config = await collection.config.get()
+                self._property_types = {
+                    prop.name: prop.data_type for prop in config.properties
+                }
+            except Exception as e:
+                _logger.warning(
+                    "Failed to fetch property types for collection "
+                    f"'{self.index_name}': {e}. Filter value coercion will "
+                    "be skipped for this call and retried on the next."
+                )
+                return {}
+        return self._property_types
+
     def add(
         self,
         nodes: List[BaseNode],
         **add_kwargs: Any,
     ) -> List[str]:
-        """Add nodes to index.
+        """
+        Add nodes to index.
 
         Args:
             nodes: List[BaseNode]: list of nodes with embeddings
@@ -286,13 +398,15 @@ class WeaviateVectorStore(BasePydanticVectorStore):
         nodes: List[BaseNode],
         **add_kwargs: Any,
     ) -> List[str]:
-        """Add nodes to index.
+        """
+        Add nodes to index.
 
         Args:
             nodes: List[BaseNode]: list of nodes with embeddings
 
         Raises:
             AsyncClientNotProvidedError: If trying to use async methods without aclient
+
         """
         if len(nodes) > 0 and not self._collection_initialized:
             if not await aclass_schema_exists(self.async_client, self.index_name):
@@ -320,7 +434,9 @@ class WeaviateVectorStore(BasePydanticVectorStore):
         where_filter = wvc.query.Filter.by_property("ref_doc_id").equal(ref_doc_id)
 
         if "filter" in delete_kwargs and delete_kwargs["filter"] is not None:
-            where_filter = where_filter & _to_weaviate_filter(delete_kwargs["filter"])
+            where_filter = where_filter & _to_weaviate_filter(
+                delete_kwargs["filter"], self._get_property_types()
+            )
 
         collection.data.delete_many(where=where_filter)
 
@@ -333,21 +449,27 @@ class WeaviateVectorStore(BasePydanticVectorStore):
 
         Raises:
             AsyncClientNotProvidedError: If trying to use async methods without aclient
+
         """
         collection = self.async_client.collections.get(self.index_name)
 
         where_filter = wvc.query.Filter.by_property("ref_doc_id").equal(ref_doc_id)
 
         if "filter" in delete_kwargs and delete_kwargs["filter"] is not None:
-            where_filter = where_filter & _to_weaviate_filter(delete_kwargs["filter"])
+            property_types = await self._aget_property_types()
+            where_filter = where_filter & _to_weaviate_filter(
+                delete_kwargs["filter"], property_types
+            )
 
         result = await collection.data.delete_many(where=where_filter)
 
     def delete_index(self) -> None:
-        """Delete the index associated with the client.
+        """
+        Delete the index associated with the client.
 
         Raises:
         - Exception: If the deletion fails, for some reason.
+
         """
         if not class_schema_exists(self.client, self.index_name):
             _logger.warning(
@@ -367,11 +489,13 @@ class WeaviateVectorStore(BasePydanticVectorStore):
         filters: Optional[MetadataFilters] = None,
         **delete_kwargs: Any,
     ) -> None:
-        """Deletes nodes.
+        """
+        Deletes nodes.
 
         Args:
             node_ids (Optional[List[str]], optional): IDs of nodes to delete. Defaults to None.
             filters (Optional[MetadataFilters], optional): Metadata filters. Defaults to None.
+
         """
         if not node_ids and not filters:
             return
@@ -382,10 +506,11 @@ class WeaviateVectorStore(BasePydanticVectorStore):
             filter = wvc.query.Filter.by_id().contains_any(node_ids or [])
 
         if filters:
+            property_types = self._get_property_types()
             if node_ids:
-                filter = filter & _to_weaviate_filter(filters)
+                filter = filter & _to_weaviate_filter(filters, property_types)
             else:
-                filter = _to_weaviate_filter(filters)
+                filter = _to_weaviate_filter(filters, property_types)
 
         collection.data.delete_many(where=filter, **delete_kwargs)
 
@@ -395,7 +520,8 @@ class WeaviateVectorStore(BasePydanticVectorStore):
         filters: Optional[MetadataFilters] = None,
         **delete_kwargs: Any,
     ) -> None:
-        """Deletes nodes.
+        """
+        Deletes nodes.
 
         Args:
             node_ids (Optional[List[str]], optional): IDs of nodes to delete. Defaults to None.
@@ -403,6 +529,7 @@ class WeaviateVectorStore(BasePydanticVectorStore):
 
         Raises:
             AsyncClientNotProvidedError: If trying to use async methods without aclient
+
         """
         if not node_ids and not filters:
             return
@@ -413,10 +540,11 @@ class WeaviateVectorStore(BasePydanticVectorStore):
             filter = wvc.query.Filter.by_id().contains_any(node_ids or [])
 
         if filters:
+            property_types = await self._aget_property_types()
             if node_ids:
-                filter = filter & _to_weaviate_filter(filters)
+                filter = filter & _to_weaviate_filter(filters, property_types)
             else:
-                filter = _to_weaviate_filter(filters)
+                filter = _to_weaviate_filter(filters, property_types)
 
         await collection.data.delete_many(where=filter, **delete_kwargs)
 
@@ -425,11 +553,13 @@ class WeaviateVectorStore(BasePydanticVectorStore):
         self.delete_index()
 
     async def aclear(self) -> None:
-        """Delete the index associated with the client.
+        """
+        Delete the index associated with the client.
 
         Raises:
         - Exception: If the deletion fails, for some reason.
         - AsyncClientNotProvidedError: If trying to use async methods without aclient
+
         """
         if not await aclass_schema_exists(self.async_client, self.index_name):
             _logger.warning(
@@ -443,7 +573,12 @@ class WeaviateVectorStore(BasePydanticVectorStore):
             _logger.error(f"Failed to delete index '{self.index_name}': {e}")
             raise Exception(f"Failed to delete index '{self.index_name}': {e}")
 
-    def get_query_parameters(self, query: VectorStoreQuery, **kwargs: Any):
+    def get_query_parameters(
+        self,
+        query: VectorStoreQuery,
+        property_types: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ):
         filters = None
 
         # list of documents to constrain search
@@ -463,7 +598,7 @@ class WeaviateVectorStore(BasePydanticVectorStore):
                 alpha = query.alpha or 0.5
 
         if query.filters is not None:
-            filters = _to_weaviate_filter(query.filters)
+            filters = _to_weaviate_filter(query.filters, property_types)
         elif "filter" in kwargs and kwargs["filter"] is not None:
             filters = kwargs["filter"]
 
@@ -508,7 +643,10 @@ class WeaviateVectorStore(BasePydanticVectorStore):
     def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
         """Query index for top k most similar nodes."""
         collection = self.client.collections.get(self.index_name)
-        query_parameters = self.get_query_parameters(query, **kwargs)
+        property_types = self._get_property_types()
+        query_parameters = self.get_query_parameters(
+            query, property_types=property_types, **kwargs
+        )
 
         # execute query
         try:
@@ -522,13 +660,18 @@ class WeaviateVectorStore(BasePydanticVectorStore):
     async def aquery(
         self, query: VectorStoreQuery, **kwargs: Any
     ) -> VectorStoreQueryResult:
-        """Query index for top k most similar nodes.
+        """
+        Query index for top k most similar nodes.
 
         Raises:
             AsyncClientNotProvidedError: If trying to use async methods without aclient
+
         """
         collection = self.async_client.collections.get(self.index_name)
-        query_parameters = self.get_query_parameters(query, **kwargs)
+        property_types = await self._aget_property_types()
+        query_parameters = self.get_query_parameters(
+            query, property_types=property_types, **kwargs
+        )
 
         # execute query
         try:

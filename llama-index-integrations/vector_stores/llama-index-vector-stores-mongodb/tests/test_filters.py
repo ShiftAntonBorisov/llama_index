@@ -1,4 +1,5 @@
-"""Demonstrates how to use filters in Vector Search.
+"""
+Demonstrates how to use filters in Vector Search.
 
 If one wishes to use filter by fields in vectorSearch,
 these fields also need to be indexed. These are full-text 'Atlas Search' Indexes.
@@ -83,7 +84,8 @@ def collection(
 
 @pytest.fixture()
 def vector_indexed(collection: Collection) -> str:
-    """This creates a vector search index
+    """
+    This creates a vector search index
     with a filter on the year field within the metadata document.
 
     To be able to filter on another field, said field must be indexed.
@@ -103,12 +105,17 @@ def vector_indexed(collection: Collection) -> str:
             filters=["metadata.year"],
             wait_until_complete=TIMEOUT,
         )
-    return VECTOR_INDEX_NAME
+    yield VECTOR_INDEX_NAME
+    if any(
+        idx["name"] == VECTOR_INDEX_NAME for idx in collection.list_search_indexes()
+    ):
+        collection.drop_search_index(VECTOR_INDEX_NAME)
 
 
 @pytest.fixture()
 def year_indexed(collection: Collection) -> str:
-    """Search Index on metadata.year nested field of type number.
+    """
+    Search Index on metadata.year nested field of type number.
 
     This is required to do filtered vector search.
     """
@@ -117,16 +124,20 @@ def year_indexed(collection: Collection) -> str:
     ):
         index.create_fulltext_search_index(
             collection=collection,
-            index_name="metadata_year",
+            index_name=FILTER_INDEX_NAME,
             field="metadata.year",
             field_type="number",
             wait_until_complete=TIMEOUT,
         )
         assert any(
-            idx["name"] == "metadata_year" for idx in collection.list_search_indexes()
+            idx["name"] == FILTER_INDEX_NAME for idx in collection.list_search_indexes()
         )
 
-    return FILTER_INDEX_NAME
+    yield FILTER_INDEX_NAME
+    if any(
+        idx["name"] == FILTER_INDEX_NAME for idx in collection.list_search_indexes()
+    ):
+        collection.drop_search_index(FILTER_INDEX_NAME)
 
 
 @pytest.fixture()
@@ -159,7 +170,8 @@ def test_search_with_filter(
     year_indexed: str,
     metadata_filters: MetadataFilters,
 ) -> None:
-    """Tests vector search with a filter.
+    """
+    Tests vector search with a filter.
 
     similarity_top_k=3 > len(vector_store.query(query).nodes)
     """

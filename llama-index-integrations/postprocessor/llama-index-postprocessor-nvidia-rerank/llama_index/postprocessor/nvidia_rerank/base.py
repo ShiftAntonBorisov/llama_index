@@ -91,6 +91,7 @@ class NVIDIARerank(BaseNodePostprocessor):
 
         API Key:
         - The recommended way to provide the API key is through the `NVIDIA_API_KEY` environment variable.
+
         """
         if not base_url or (base_url in KNOWN_URLS and not model):
             model = model or DEFAULT_MODEL
@@ -149,7 +150,8 @@ class NVIDIARerank(BaseNodePostprocessor):
         return self.base_url.rstrip("/")
 
     def _get_headers(self, auth_required: bool = False) -> dict:
-        """Return default headers for HTTP requests.
+        """
+        Return default headers for HTTP requests.
 
         If auth_required is True or the client is hosted, includes an Authorization header.
         """
@@ -160,7 +162,10 @@ class NVIDIARerank(BaseNodePostprocessor):
 
     def _get_models(self) -> List[Model]:
         client = self.client
-        _headers = self._get_headers(auth_required=self._is_hosted)
+        _headers = self._get_headers(
+            auth_required=bool(self._api_key != "NO_API_KEY_PROVIDED" and self._api_key)
+            or self._is_hosted
+        )
         url = (
             "https://integrate.api.nvidia.com/v1/models"
             if self._is_hosted
@@ -169,18 +174,18 @@ class NVIDIARerank(BaseNodePostprocessor):
         response = client.get(url, headers=_headers)
         response.raise_for_status()
 
-        assert (
-            "data" in response.json()
-        ), "Response does not contain expected 'data' key"
-        assert isinstance(
-            response.json()["data"], list
-        ), "Response 'data' is not a list"
-        assert all(
-            isinstance(result, dict) for result in response.json()["data"]
-        ), "Response 'data' is not a list of dictionaries"
-        assert all(
-            "id" in result for result in response.json()["data"]
-        ), "Response 'rankings' is not a list of dictionaries with 'id'"
+        assert "data" in response.json(), (
+            "Response does not contain expected 'data' key"
+        )
+        assert isinstance(response.json()["data"], list), (
+            "Response 'data' is not a list"
+        )
+        assert all(isinstance(result, dict) for result in response.json()["data"]), (
+            "Response 'data' is not a list of dictionaries"
+        )
+        assert all("id" in result for result in response.json()["data"]), (
+            "Response 'rankings' is not a list of dictionaries with 'id'"
+        )
 
         # TODO: hosted now has a model listing, need to merge known and listed models
         # TODO: parse model config for local models
@@ -217,6 +222,7 @@ class NVIDIARerank(BaseNodePostprocessor):
 
         Raises:
             ValueError: If the model is incompatible with the client.
+
         """
         model = determine_model(model_name)
         available_model_ids = [model.id for model in self.available_models]
@@ -227,20 +233,8 @@ class NVIDIARerank(BaseNodePostprocessor):
             else:
                 if model_name not in available_model_ids:
                     raise ValueError(f"No locally hosted {model_name} was found.")
-        model = determine_model(model_name)
-        available_model_ids = [model.id for model in self.available_models]
 
-        if not model:
-            if self._is_hosted:
-                warnings.warn(f"Unable to determine validity of {model_name}")
-            else:
-                if model_name not in available_model_ids:
-                    raise ValueError(f"No locally hosted {model_name} was found.")
-
-        if model and model.endpoint:
-            self.base_url = model.endpoint
-
-        if model and model.endpoint:
+        if self._is_hosted and model and model.endpoint:
             self.base_url = model.endpoint
 
     @property
@@ -288,6 +282,10 @@ class NVIDIARerank(BaseNodePostprocessor):
         if len(nodes) == 0:
             return []
 
+        url = self.normalized_base_url
+        if not url.endswith(("/ranking", "/reranking")):
+            url = f"{url}/ranking"
+
         client = self.client
         _headers = self._get_headers(auth_required=True)
 
@@ -316,7 +314,8 @@ class NVIDIARerank(BaseNodePostprocessor):
                         for n in batch
                     ],
                 }
-                response = client.post(self.base_url, headers=_headers, json=payloads)
+
+                response = client.post(url, headers=_headers, json=payloads)
                 response.raise_for_status()
                 # expected response format:
                 # {
@@ -328,19 +327,21 @@ class NVIDIARerank(BaseNodePostprocessor):
                 #         ...
                 #     ]
                 # }
-                assert (
-                    "rankings" in response.json()
-                ), "Response does not contain expected 'rankings' key"
-                assert isinstance(
-                    response.json()["rankings"], list
-                ), "Response 'rankings' is not a list"
+                assert "rankings" in response.json(), (
+                    "Response does not contain expected 'rankings' key"
+                )
+                assert isinstance(response.json()["rankings"], list), (
+                    "Response 'rankings' is not a list"
+                )
                 assert all(
                     isinstance(result, dict) for result in response.json()["rankings"]
                 ), "Response 'rankings' is not a list of dictionaries"
                 assert all(
                     "index" in result and "logit" in result
                     for result in response.json()["rankings"]
-                ), "Response 'rankings' is not a list of dictionaries with 'index' and 'logit' keys"
+                ), (
+                    "Response 'rankings' is not a list of dictionaries with 'index' and 'logit' keys"
+                )
                 for result in response.json()["rankings"][: self.top_n]:
                     results.append(
                         NodeWithScore(

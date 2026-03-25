@@ -20,15 +20,23 @@ from llama_index.core.base.llms.types import (
     LogProb,
     MessageRole,
     TextBlock,
+    ToolCallBlock,
 )
 from llama_index.core.bridge.pydantic import BaseModel
 from llama_index.llms.openai import OpenAI
 from llama_index.llms.openai.utils import (
+    ALL_AVAILABLE_MODELS,
+    CHAT_MODELS,
     from_openai_completion_logprobs,
     from_openai_message_dicts,
     from_openai_messages,
     from_openai_token_logprob,
     from_openai_token_logprobs,
+    is_chat_model,
+    is_chatcomp_api_supported,
+    is_function_calling_model,
+    is_json_schema_supported,
+    openai_modelname_to_contextsize,
     to_openai_message_dicts,
     to_openai_tool,
 )
@@ -111,7 +119,14 @@ def azure_chat_messages_with_function_calling() -> List[ChatMessage]:
     return [
         ChatMessage(
             role=MessageRole.ASSISTANT,
-            content=None,
+            blocks=[
+                ToolCallBlock(
+                    block_type="tool_call",
+                    tool_call_id="0123",
+                    tool_name="search_hotels",
+                    tool_kwargs='{\n  "location": "San Diego",\n  "max_price": 300,\n  "features": "beachfront,free breakfast"\n}',
+                )
+            ],
             additional_kwargs={
                 "tool_calls": [
                     ChatCompletionMessageToolCall(
@@ -186,7 +201,9 @@ def test_from_openai_message_dicts_function_calling(
     openai_message_dicts_with_function_calling: List[ChatCompletionMessageParam],
     chat_messages_with_function_calling: List[ChatMessage],
 ) -> None:
-    chat_messages = from_openai_message_dicts(openai_message_dicts_with_function_calling)  # type: ignore
+    chat_messages = from_openai_message_dicts(
+        openai_message_dicts_with_function_calling
+    )  # type: ignore
 
     # assert attributes match
     for chat_message, chat_message_with_function_calling in zip(
@@ -263,7 +280,9 @@ def test_to_openai_message_dicts_with_content_blocks() -> None:
             {"type": "text", "text": "test question"},
             {
                 "type": "image_url",
-                "image_url": {"url": "https://example.com/image.jpg"},
+                "image_url": {
+                    "url": "https://example.com/image.jpg",
+                },
             },
         ],
     }
@@ -289,6 +308,32 @@ def test_to_openai_message_dicts_with_content_blocks() -> None:
     assert openai_message == {
         "role": "assistant",
         "content": "test question",
+    }
+
+
+def test_to_openai_message_dicts_with_content_blocks_with_detail() -> None:
+    chat_message = ChatMessage(
+        role=MessageRole.USER,
+        blocks=[
+            TextBlock(text="test question"),
+            ImageBlock(url="https://example.com/image.jpg", detail="high"),
+        ],
+    )
+
+    # user messages are converted to blocks
+    openai_message = to_openai_message_dicts([chat_message])[0]
+    assert openai_message == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "test question"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://example.com/image.jpg",
+                    "detail": "high",
+                },
+            },
+        ],
     }
 
 
@@ -357,3 +402,229 @@ def test_get_tool_calls_from_response_returns_arguments_with_dict_json_input() -
     tools = OpenAI().get_tool_calls_from_response(response)
     assert len(tools) == 1
     assert tools[0].tool_kwargs == arguments
+
+
+def test_is_json_schema_supported_supported_models() -> None:
+    """Test that supported models return True."""
+    supported_models = [
+        "gpt-4o",
+        "gpt-4o-2024-05-13",
+        "gpt-4.1",
+    ]
+
+    for model in supported_models:
+        assert is_json_schema_supported(model), f"Model {model} should be supported"
+
+
+def test_is_json_schema_supported_o1_mini_excluded() -> None:
+    """Test that o1-mini models are explicitly excluded."""
+    o1_mini_models = [
+        "o1-mini",
+        "o1-mini-2024-09-12",
+    ]
+
+    for model in o1_mini_models:
+        assert is_json_schema_supported(model) is False, (
+            f"Model {model} should be excluded"
+        )
+
+
+def test_is_json_schema_supported_unsupported_models() -> None:
+    """Test that unsupported models return False."""
+    unsupported_models = [
+        "gpt-3.5-turbo-0613",
+        "gpt-4-0613",
+        "text-davinci-003",
+        "babbage-002",
+        "unknown-model",
+    ]
+
+    for model in unsupported_models:
+        assert is_json_schema_supported(model) is False, (
+            f"Model {model} should not be supported"
+        )
+
+
+def test_gpt_5_chat_latest_model_support() -> None:
+    """Test that gpt-5-chat-latest is properly supported."""
+    model_name = "gpt-5-chat-latest"
+
+    # Test that model is in available models
+    assert model_name in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should be in ALL_AVAILABLE_MODELS"
+    )
+
+    # Test that model is recognized as a chat model
+    assert is_chat_model(model_name) is True, (
+        f"{model_name} should be recognized as a chat model"
+    )
+
+    # Test that model supports function calling
+    assert is_function_calling_model(model_name) is True, (
+        f"{model_name} should support function calling"
+    )
+
+    # Test that model has correct context size
+    context_size = openai_modelname_to_contextsize(model_name)
+    assert context_size == 128000, (
+        f"{model_name} should have 128000 tokens context, got {context_size}"
+    )
+
+    # Test that model is in CHAT_MODELS
+    assert model_name in CHAT_MODELS, f"{model_name} should be in CHAT_MODELS"
+
+
+def test_is_chatcomp_api_supported() -> None:
+    assert is_chatcomp_api_supported("gpt-5.2")
+    assert not is_chatcomp_api_supported("gpt-5.2-pro")
+    assert is_chatcomp_api_supported("gpt-5.4")
+    assert not is_chatcomp_api_supported("gpt-5.4-pro")
+
+
+def test_gpt_5_chat_model_support() -> None:
+    """Test that gpt-5-chat is properly supported."""
+    model_name = "gpt-5-chat"
+
+    assert model_name in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should be in ALL_AVAILABLE_MODELS"
+    )
+
+    assert is_chat_model(model_name) is True, (
+        f"{model_name} should be recognized as a chat model"
+    )
+
+    assert is_function_calling_model(model_name) is True, (
+        f"{model_name} should support function calling"
+    )
+
+    context_size = openai_modelname_to_contextsize(model_name)
+    assert context_size == 128000, (
+        f"{model_name} should have 128000 tokens context, got {context_size}"
+    )
+
+    assert model_name in CHAT_MODELS, f"{model_name} should be in CHAT_MODELS"
+
+
+def test_gpt_5_4_model_support() -> None:
+    """Test that gpt-5.4 is properly supported as a reasoning model."""
+    model_name = "gpt-5.4"
+
+    assert model_name in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should be in ALL_AVAILABLE_MODELS"
+    )
+
+    assert is_chat_model(model_name) is True, (
+        f"{model_name} should be recognized as a chat model"
+    )
+
+    assert is_function_calling_model(model_name) is True, (
+        f"{model_name} should support function calling"
+    )
+
+    context_size = openai_modelname_to_contextsize(model_name)
+    assert context_size == 1050000, (
+        f"{model_name} should have 1050000 tokens context, got {context_size}"
+    )
+
+    assert model_name in CHAT_MODELS, f"{model_name} should be in CHAT_MODELS"
+
+    assert is_json_schema_supported(model_name) is True, (
+        f"{model_name} should support JSON schema"
+    )
+
+
+def test_gpt_5_4_mini_model_support() -> None:
+    """Test that gpt-5.4-mini is properly supported as a reasoning model."""
+    model_name = "gpt-5.4-mini"
+
+    assert model_name in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should be in ALL_AVAILABLE_MODELS"
+    )
+
+    assert is_chat_model(model_name) is True, (
+        f"{model_name} should be recognized as a chat model"
+    )
+
+    assert is_function_calling_model(model_name) is True, (
+        f"{model_name} should support function calling"
+    )
+
+    context_size = openai_modelname_to_contextsize(model_name)
+    assert context_size == 400000, (
+        f"{model_name} should have 400000 tokens context, got {context_size}"
+    )
+
+    assert model_name in CHAT_MODELS, f"{model_name} should be in CHAT_MODELS"
+
+    assert is_json_schema_supported(model_name) is True, (
+        f"{model_name} should support JSON schema"
+    )
+
+
+def test_gpt_5_4_nano_model_support() -> None:
+    """Test that gpt-5.4-nano is properly supported as a reasoning model."""
+    model_name = "gpt-5.4-nano"
+
+    assert model_name in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should be in ALL_AVAILABLE_MODELS"
+    )
+
+    assert is_chat_model(model_name) is True, (
+        f"{model_name} should be recognized as a chat model"
+    )
+
+    assert is_function_calling_model(model_name) is True, (
+        f"{model_name} should support function calling"
+    )
+
+    context_size = openai_modelname_to_contextsize(model_name)
+    assert context_size == 400000, (
+        f"{model_name} should have 400000 tokens context, got {context_size}"
+    )
+
+    assert model_name in CHAT_MODELS, f"{model_name} should be in CHAT_MODELS"
+
+    assert is_json_schema_supported(model_name) is True, (
+        f"{model_name} should support JSON schema"
+    )
+
+
+def test_gpt_5_4_chat_latest_model_support() -> None:
+    """Test that gpt-5.4-chat-latest is properly supported."""
+    model_name = "gpt-5.4-chat-latest"
+
+    assert model_name in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should be in ALL_AVAILABLE_MODELS"
+    )
+
+    assert is_chat_model(model_name) is True, (
+        f"{model_name} should be recognized as a chat model"
+    )
+
+    assert is_function_calling_model(model_name) is True, (
+        f"{model_name} should support function calling"
+    )
+
+    context_size = openai_modelname_to_contextsize(model_name)
+    assert context_size == 128000, (
+        f"{model_name} should have 128000 tokens context, got {context_size}"
+    )
+
+    assert model_name in CHAT_MODELS, f"{model_name} should be in CHAT_MODELS"
+
+
+def test_gpt_5_4_pro_responses_api_only() -> None:
+    """Test that gpt-5.4-pro is a Responses API only model."""
+    model_name = "gpt-5.4-pro"
+
+    assert not is_chatcomp_api_supported(model_name), (
+        f"{model_name} should NOT support Chat Completions API"
+    )
+
+    assert model_name not in ALL_AVAILABLE_MODELS, (
+        f"{model_name} should NOT be in ALL_AVAILABLE_MODELS (Responses API only)"
+    )
+
+    assert is_json_schema_supported(model_name) is True, (
+        f"{model_name} should support JSON schema"
+    )

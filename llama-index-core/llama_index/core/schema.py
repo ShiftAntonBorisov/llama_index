@@ -32,6 +32,7 @@ import requests
 from dataclasses_json import DataClassJsonMixin
 from deprecated import deprecated
 from typing_extensions import Self
+from PIL import Image
 
 from llama_index.core.bridge.pydantic import (
     AnyUrl,
@@ -45,6 +46,7 @@ from llama_index.core.bridge.pydantic import (
     SerializeAsAny,
     SerializerFunctionWrapHandler,
     ValidationInfo,
+    field_serializer,
     field_validator,
     model_serializer,
 )
@@ -57,6 +59,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from llama_cloud.types.cloud_document import CloudDocument  # type: ignore
     from semantic_kernel.memory.memory_record import MemoryRecord  # type: ignore
 
+    from llama_index.core.base.llms.types import BaseContentBlock
     from llama_index.core.bridge.langchain import Document as LCDocument  # type: ignore
 
 
@@ -202,7 +205,8 @@ class TransformComponent(BaseComponent, DispatcherSpanMixin):
 
 
 class NodeRelationship(str, Enum):
-    """Node relationships used in `BaseNode` class.
+    """
+    Node relationships used in `BaseNode` class.
 
     Attributes:
         SOURCE: The node is the source document.
@@ -258,7 +262,8 @@ RelatedNodeType = Union[RelatedNodeInfo, List[RelatedNodeInfo]]
 
 # Node classes for indexes
 class BaseNode(BaseComponent):
-    """Base node Object.
+    """
+    Base node Object.
 
     Generic abstract interface for retrievable nodes
 
@@ -323,6 +328,12 @@ class BaseNode(BaseComponent):
     def get_content(self, metadata_mode: MetadataMode = MetadataMode.ALL) -> str:
         """Get object content."""
 
+    @abstractmethod
+    def get_content_blocks(
+        self, metadata_mode: MetadataMode = MetadataMode.ALL
+    ) -> list[BaseContentBlock]:
+        """Get content blocks for the node."""
+
     def get_metadata_str(self, mode: MetadataMode = MetadataMode.ALL) -> str:
         """Metadata info string."""
         if mode == MetadataMode.NONE:
@@ -346,6 +357,19 @@ class BaseNode(BaseComponent):
             ]
         )
 
+    def get_metadata_content_blocks(
+        self, metadata_mode: MetadataMode
+    ) -> list[BaseContentBlock]:
+        """Get metadata content block if metadata_mode is not NONE."""
+        from llama_index.core.base.llms.types import TextBlock
+
+        if metadata_mode == MetadataMode.NONE:
+            return []
+        metadata_str = self.get_metadata_str(mode=metadata_mode).strip()
+        if not metadata_str:
+            return []
+        return [TextBlock(text=metadata_str)]
+
     @abstractmethod
     def set_content(self, value: Any) -> None:
         """Set the content of the node."""
@@ -365,7 +389,8 @@ class BaseNode(BaseComponent):
 
     @property
     def source_node(self) -> Optional[RelatedNodeInfo]:
-        """Source object node.
+        """
+        Source object node.
 
         Extracted from the relationships field.
 
@@ -456,7 +481,8 @@ class BaseNode(BaseComponent):
         return f"Node ID: {self.node_id}\n{source_text_wrapped}"
 
     def get_embedding(self) -> List[float]:
-        """Get embedding.
+        """
+        Get embedding.
 
         Errors if embedding is None.
 
@@ -479,7 +505,8 @@ EmbeddingKind = Literal["sparse", "dense"]
 
 
 class MediaResource(BaseModel):
-    """A container class for media content.
+    """
+    A container class for media content.
 
     This class represents a generic media resource that can be stored and accessed
     in multiple ways - as raw bytes, on the filesystem, or via URL. It also supports
@@ -492,6 +519,7 @@ class MediaResource(BaseModel):
         mimetype: The MIME type indicating the format/type of the media content
         path: Local filesystem path where the media content can be accessed
         url: URL where the media content can be accessed remotely
+
     """
 
     embeddings: dict[EmbeddingKind, list[float]] | None = Field(
@@ -521,7 +549,8 @@ class MediaResource(BaseModel):
     @field_validator("data", mode="after")
     @classmethod
     def validate_data(cls, v: bytes | None, info: ValidationInfo) -> bytes | None:
-        """If binary data was passed, store the resource as base64 and guess the mimetype when possible.
+        """
+        If binary data was passed, store the resource as base64 and guess the mimetype when possible.
 
         In case the model was built passing binary data but without a mimetype,
         we try to guess it using the filetype library. To avoid resource-intense
@@ -565,16 +594,31 @@ class MediaResource(BaseModel):
 
         return v
 
+    @field_serializer("path")  # type: ignore
+    def serialize_path(
+        self, path: Optional[Path], _info: ValidationInfo
+    ) -> Optional[str]:
+        if path is None:
+            return path
+        return str(path)
+
     @property
     def hash(self) -> str:
-        """Generate a hash to uniquely identify the media resource.
+        """
+        Generate a hash to uniquely identify the media resource.
 
         The hash is generated based on the available content (data, path, text or url).
-        Returns an empty string if no content is available.
+        Returns an empty string if no content is available (all fields are None).
+        Note: An empty string for text (text="") is treated as valid content and
+        will produce a different hash than text=None.
         """
         bits: list[str] = []
         if self.text is not None:
-            bits.append(self.text)
+            # Use marker for empty string to distinguish from None
+            if self.text == "":
+                bits.append("<empty_string>")
+            else:
+                bits.append(self.text)
         if self.data is not None:
             # Hash the binary data if available
             bits.append(str(sha256(self.data).hexdigest()))
@@ -585,10 +629,10 @@ class MediaResource(BaseModel):
             # Use the URL string as basis for hash
             bits.append(str(sha256(str(self.url).encode("utf-8")).hexdigest()))
 
-        doc_identity = "".join(bits)
-        if not doc_identity:
+        if not bits:
             return ""
-        return str(sha256(doc_identity.encode("utf-8", "surrogatepass")).hexdigest())
+        doc_identity = "".join(bits)
+        return str(sha256(doc_identity.encode("utf-8")).hexdigest())
 
 
 class Node(BaseNode):
@@ -622,19 +666,73 @@ class Node(BaseNode):
         return ObjectType.MULTIMODAL
 
     def get_content(self, metadata_mode: MetadataMode = MetadataMode.NONE) -> str:
-        """Get the text content for the node if available.
+        """
+        Get the text content for the node if available.
 
         Provided for backward compatibility, use self.text_resource directly instead.
         """
         if self.text_resource:
+            metadata_str = self.get_metadata_str(metadata_mode)
+            if metadata_mode == MetadataMode.NONE or not metadata_str:
+                return self.text_resource.text or ""
+
             return self.text_template.format(
                 content=self.text_resource.text or "",
-                metadata_str=self.get_metadata_str(metadata_mode),
+                metadata_str=metadata_str,
             ).strip()
         return ""
 
+    def get_content_blocks(
+        self, metadata_mode: MetadataMode = MetadataMode.NONE
+    ) -> list[BaseContentBlock]:
+        """
+        Get content blocks for the node.
+        """
+        from llama_index.core.base.llms.types import (
+            TextBlock,
+            ImageBlock,
+            AudioBlock,
+            VideoBlock,
+        )
+
+        blocks: list[BaseContentBlock] = []
+        blocks.extend(self.get_metadata_content_blocks(metadata_mode))
+        if self.text_resource:
+            blocks.append(TextBlock(text=self.text_resource.text or ""))
+        if self.image_resource:
+            blocks.append(
+                ImageBlock(
+                    image=self.image_resource.data,
+                    url=self.image_resource.url,
+                    path=self.image_resource.path,
+                    image_mimetype=self.image_resource.mimetype,
+                )
+            )
+        if self.audio_resource:
+            guess = filetype.get_type(mime=self.audio_resource.mimetype)
+            blocks.append(
+                AudioBlock(
+                    audio=self.audio_resource.data,
+                    url=self.audio_resource.url,
+                    path=self.audio_resource.path,
+                    format=guess.extension if guess else None,
+                )
+            )
+        if self.video_resource:
+            blocks.append(
+                VideoBlock(
+                    video=self.video_resource.data,
+                    url=self.video_resource.url,
+                    path=self.video_resource.path,
+                    video_mimetype=self.video_resource.mimetype,
+                )
+            )
+
+        return blocks
+
     def set_content(self, value: str) -> None:
-        """Set the text content of the node.
+        """
+        Set the text content of the node.
 
         Provided for backward compatibility, set self.text_resource instead.
         """
@@ -642,7 +740,15 @@ class Node(BaseNode):
 
     @property
     def hash(self) -> str:
+        """
+        Generate a hash representing the state of the node.
+
+        The hash is generated based on the available resources (audio, image, text or video) and its metadata.
+        """
         doc_identities = []
+        metadata_str = self.get_metadata_str(mode=MetadataMode.ALL)
+        if metadata_str:
+            doc_identities.append(metadata_str)
         if self.audio_resource is not None:
             doc_identities.append(self.audio_resource.hash)
         if self.image_resource is not None:
@@ -657,11 +763,7 @@ class Node(BaseNode):
 
 
 class TextNode(BaseNode):
-    """Provided for backward compatibility.
-
-    Note: we keep the field with the typo "seperator" to maintain backward compatibility for
-    serialized objects.
-    """
+    """Provided for backward compatibility."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Make TextNode forward-compatible with Node by supporting 'text_resource' in the constructor."""
@@ -682,10 +784,6 @@ class TextNode(BaseNode):
     )
     end_char_idx: Optional[int] = Field(
         default=None, description="End char index of the node."
-    )
-    metadata_seperator: str = Field(
-        default="\n",
-        description="Separator between metadata fields when converting to string.",
     )
     text_template: str = Field(
         default=DEFAULT_TEXT_NODE_TMPL,
@@ -712,35 +810,23 @@ class TextNode(BaseNode):
     def get_content(self, metadata_mode: MetadataMode = MetadataMode.NONE) -> str:
         """Get object content."""
         metadata_str = self.get_metadata_str(mode=metadata_mode).strip()
-        if not metadata_str:
+        if metadata_mode == MetadataMode.NONE or not metadata_str:
             return self.text
 
         return self.text_template.format(
             content=self.text, metadata_str=metadata_str
         ).strip()
 
-    def get_metadata_str(self, mode: MetadataMode = MetadataMode.ALL) -> str:
-        """Metadata info string."""
-        if mode == MetadataMode.NONE:
-            return ""
+    def get_content_blocks(
+        self, metadata_mode: MetadataMode = MetadataMode.NONE
+    ) -> list[BaseContentBlock]:
+        """Get content blocks for the node."""
+        from llama_index.core.base.llms.types import TextBlock
 
-        usable_metadata_keys = set(self.metadata.keys())
-        if mode == MetadataMode.LLM:
-            for key in self.excluded_llm_metadata_keys:
-                if key in usable_metadata_keys:
-                    usable_metadata_keys.remove(key)
-        elif mode == MetadataMode.EMBED:
-            for key in self.excluded_embed_metadata_keys:
-                if key in usable_metadata_keys:
-                    usable_metadata_keys.remove(key)
-
-        return self.metadata_seperator.join(
-            [
-                self.metadata_template.format(key=key, value=str(value))
-                for key, value in self.metadata.items()
-                if key in usable_metadata_keys
-            ]
-        )
+        blocks: list[BaseContentBlock] = []
+        blocks.extend(self.get_metadata_content_blocks(metadata_mode))
+        blocks.append(TextBlock(text=self.text))
+        return blocks
 
     def set_content(self, value: str) -> None:
         """Set the content of the node."""
@@ -819,7 +905,7 @@ class ImageNode(TextNode):
             # load image from URL
             import requests
 
-            response = requests.get(self.image_url)
+            response = requests.get(self.image_url, timeout=(60, 60))
             return BytesIO(response.content)
         else:
             raise ValueError("No image found in node.")
@@ -835,9 +921,33 @@ class ImageNode(TextNode):
         doc_identity = f"{image_str}-{image_path_str}-{image_url_str}-{image_text}"
         return str(sha256(doc_identity.encode("utf-8", "surrogatepass")).hexdigest())
 
+    def get_content_blocks(
+        self, metadata_mode: MetadataMode = MetadataMode.NONE
+    ) -> list[BaseContentBlock]:
+        """Get content blocks for the node."""
+        from llama_index.core.base.llms.types import ImageBlock
+
+        blocks: list[BaseContentBlock] = []
+        blocks.extend(self.get_metadata_content_blocks(metadata_mode))
+        resolved = self.resolve_image()
+        if isinstance(resolved, BytesIO):
+            image_data: bytes | None = resolved.read()
+        else:
+            image_data = None
+        blocks.append(
+            ImageBlock(
+                image=image_data,
+                url=self.image_url,
+                path=self.image_path,
+                image_mimetype=self.image_mimetype,
+            )
+        )
+        return blocks
+
 
 class IndexNode(TextNode):
-    """Node with reference to any object.
+    """
+    Node with reference to any object.
 
     This can include other indices, query engines, retrievers.
 
@@ -976,13 +1086,15 @@ class NodeWithScore(BaseComponent):
 
 
 class Document(Node):
-    """Generic interface for a data document.
+    """
+    Generic interface for a data document.
 
     This document connects to data sources.
     """
 
     def __init__(self, **data: Any) -> None:
-        """Keeps backward compatibility with old 'Document' versions.
+        """
+        Keeps backward compatibility with old 'Document' versions.
 
         If 'text' was passed, store it in 'text_resource'.
         If 'doc_id' was passed, store it in 'id_'.
@@ -1004,7 +1116,7 @@ class Document(Node):
             else:
                 data["metadata"] = value
 
-        if "text" in data:
+        if data.get("text"):
             text = data.pop("text")
             if "text_resource" in data:
                 text_resource = (
@@ -1185,6 +1297,27 @@ class Document(Node):
         )
 
 
+def is_image_pil(file_path: str) -> bool:
+    try:
+        with Image.open(file_path) as img:
+            img.verify()  # Verify it's a valid image
+        return True
+    except (IOError, SyntaxError):
+        return False
+
+
+def is_image_url_pil(url: str) -> bool:
+    try:
+        response = requests.get(url, stream=True, timeout=(60, 60))
+        response.raise_for_status()  # Raise an exception for bad status codes
+        # Open image from the response content
+        img = Image.open(BytesIO(response.content))
+        img.verify()
+        return True
+    except (requests.RequestException, IOError, SyntaxError):
+        return False
+
+
 class ImageDocument(Document):
     """Backward compatible wrapper around Document containing an image."""
 
@@ -1200,10 +1333,14 @@ class ImageDocument(Document):
                 data=image, mimetype=image_mimetype
             )
         elif image_path:
+            if not is_image_pil(image_path):
+                raise ValueError("The specified file path is not an accessible image")
             kwargs["image_resource"] = MediaResource(
                 path=image_path, mimetype=image_mimetype
             )
         elif image_url:
+            if not is_image_url_pil(image_url):
+                raise ValueError("The specified URL is not an accessible image")
             kwargs["image_resource"] = MediaResource(
                 url=image_url, mimetype=image_mimetype
             )
@@ -1269,10 +1406,12 @@ class ImageDocument(Document):
         return "ImageDocument"
 
     def resolve_image(self, as_base64: bool = False) -> BytesIO:
-        """Resolve an image such that PIL can read it.
+        """
+        Resolve an image such that PIL can read it.
 
         Args:
             as_base64 (bool): whether the resolved image should be returned as base64-encoded bytes
+
         """
         if self.image_resource is None:
             return BytesIO()
@@ -1288,7 +1427,7 @@ class ImageDocument(Document):
             return BytesIO(img_bytes)
         elif self.image_resource.url is not None:
             # load image from URL
-            response = requests.get(str(self.image_resource.url))
+            response = requests.get(str(self.image_resource.url), timeout=(60, 60))
             img_bytes = response.content
             if as_base64:
                 return BytesIO(base64.b64encode(img_bytes))
@@ -1310,6 +1449,7 @@ class QueryBundle(DataClassJsonMixin):
         custom_embedding_strs (list[str]): list of strings used for embedding the query.
             This is currently used by all embedding-based queries.
         embedding (list[float]): the stored embedding for the query.
+
     """
 
     query_str: str

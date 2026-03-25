@@ -23,12 +23,19 @@ from llama_index.core.base.llms.generic_utils import (
 )
 from llama_index.core.llms.llm import LLM
 from llama_index.core.types import BaseOutputParser, PydanticProgramMode
-from llama_index.llms.vllm.utils import get_response, post_http_request
+from llama_index.llms.vllm.utils import (
+    get_openai_chat_response,
+    get_openai_streaming_deltas,
+    get_response,
+    post_http_request,
+    post_openai_chat_request,
+)
 import atexit
 
 
 class Vllm(LLM):
-    r"""Vllm LLM.
+    r"""
+    Vllm LLM.
 
     This class runs a vLLM model locally.
 
@@ -60,6 +67,7 @@ class Vllm(LLM):
             "What is a black hole?"
         )
         ```
+
     """
 
     model: Optional[str] = Field(description="The HuggingFace Model to use.")
@@ -143,6 +151,11 @@ class Vllm(LLM):
 
     api_url: str = Field(description="The api url for vllm server")
 
+    is_chat_model: bool = Field(
+        default=False,
+        description=LLMMetadata.model_fields["is_chat_model"].description,
+    )
+
     _client: Any = PrivateAttr()
 
     def __init__(
@@ -171,6 +184,7 @@ class Vllm(LLM):
         completion_to_prompt: Optional[Callable[[str], str]] = None,
         pydantic_program_mode: PydanticProgramMode = PydanticProgramMode.DEFAULT,
         output_parser: Optional[BaseOutputParser] = None,
+        is_chat_model: Optional[bool] = False,
     ) -> None:
         callback_manager = callback_manager or CallbackManager([])
         super().__init__(
@@ -196,6 +210,7 @@ class Vllm(LLM):
             completion_to_prompt=completion_to_prompt,
             pydantic_program_mode=pydantic_program_mode,
             output_parser=output_parser,
+            is_chat_model=is_chat_model,
         )
         if not api_url:
             try:
@@ -211,7 +226,7 @@ class Vllm(LLM):
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
                 download_dir=download_dir,
-                **vllm_kwargs
+                **vllm_kwargs,
             )
         else:
             self._client = None
@@ -222,7 +237,7 @@ class Vllm(LLM):
 
     @property
     def metadata(self) -> LLMMetadata:
-        return LLMMetadata(model_name=self.model)
+        return LLMMetadata(model_name=self.model, is_chat_model=self.is_chat_model)
 
     @property
     def _model_kwargs(self) -> Dict[str, Any]:
@@ -318,7 +333,8 @@ class Vllm(LLM):
 
 
 class VllmServer(Vllm):
-    r"""Vllm LLM.
+    r"""
+    Vllm LLM.
 
     This class connects to a vLLM server (non-openai versions).
 
@@ -351,7 +367,20 @@ class VllmServer(Vllm):
             "What is a black hole?"
         )
         ```
+
     """
+
+    openai_like: bool = Field(
+        default=False,
+        description="Treat the endpoint as OpenAI-compatible chat/completions API (streaming supported).",
+    )
+    api_headers: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Additional headers to send to the vLLM server.",
+    )
+    timeout: float = Field(
+        default=60.0, description="Request timeout (seconds) for server calls."
+    )
 
     def __init__(
         self,
@@ -377,6 +406,9 @@ class VllmServer(Vllm):
         vllm_kwargs: Dict[str, Any] = {},
         callback_manager: Optional[CallbackManager] = None,
         output_parser: Optional[BaseOutputParser] = None,
+        openai_like: bool = False,
+        api_headers: Optional[Dict[str, str]] = None,
+        timeout: float = 60.0,
     ) -> None:
         messages_to_prompt = messages_to_prompt or generic_messages_to_prompt
         completion_to_prompt = completion_to_prompt or (lambda x: x)
@@ -405,13 +437,15 @@ class VllmServer(Vllm):
             output_parser=output_parser,
         )
         self._client = None
+        self.openai_like = openai_like
+        self.api_headers = api_headers or {}
+        self.timeout = timeout
 
     @classmethod
     def class_name(cls) -> str:
         return "VllmServer"
 
-    def __del__(self) -> None:
-        ...
+    def __del__(self) -> None: ...
 
     @llm_completion_callback()
     def complete(
@@ -420,12 +454,28 @@ class VllmServer(Vllm):
         kwargs = kwargs if kwargs else {}
         params = {**self._model_kwargs, **kwargs}
 
-        # build sampling parameters
+        if self.openai_like:
+            payload = self._build_openai_payload(prompt, params, chat=False)
+            response = post_openai_chat_request(
+                self.api_url,
+                payload,
+                headers=self.api_headers,
+                timeout=self.timeout,
+                stream=False,
+            )
+            text = get_openai_chat_response(response)
+            return CompletionResponse(text=text)
+
         sampling_params = dict(**params)
         sampling_params["prompt"] = prompt
-        response = post_http_request(self.api_url, sampling_params, stream=False)
+        response = post_http_request(
+            self.api_url,
+            sampling_params,
+            stream=False,
+            headers=self.api_headers,
+            timeout=self.timeout,
+        )
         output = get_response(response)
-
         return CompletionResponse(text=output[0])
 
     @llm_completion_callback()
@@ -435,25 +485,48 @@ class VllmServer(Vllm):
         kwargs = kwargs if kwargs else {}
         params = {**self._model_kwargs, **kwargs}
 
+        if self.openai_like:
+            payload = self._build_openai_payload(prompt, params, chat=False)
+            response = post_openai_chat_request(
+                self.api_url,
+                payload,
+                headers=self.api_headers,
+                timeout=self.timeout,
+                stream=True,
+            )
+
+            def gen() -> CompletionResponseGen:
+                accum = ""
+                for delta in get_openai_streaming_deltas(response):
+                    accum += delta
+                    yield CompletionResponse(text=accum, delta=delta)
+
+            return gen()
+
         sampling_params = dict(**params)
         sampling_params["prompt"] = prompt
-        response = post_http_request(self.api_url, sampling_params, stream=True)
+        response = post_http_request(
+            self.api_url,
+            sampling_params,
+            stream=True,
+            headers=self.api_headers,
+            timeout=self.timeout,
+        )
 
         def gen() -> CompletionResponseGen:
-            response_str = ""
             prev_prefix_len = len(prompt)
             for chunk in response.iter_lines(
                 chunk_size=8192, decode_unicode=False, delimiter=b"\0"
             ):
-                if chunk:
-                    data = json.loads(chunk.decode("utf-8"))
-
-                    increasing_concat = data["text"][0]
-                    pref = prev_prefix_len
-                    prev_prefix_len = len(increasing_concat)
-                    yield CompletionResponse(
-                        text=increasing_concat, delta=increasing_concat[pref:]
-                    )
+                if not chunk:
+                    continue
+                data = json.loads(chunk.decode("utf-8"))
+                increasing_concat = data["text"][0]
+                pref = prev_prefix_len
+                prev_prefix_len = len(increasing_concat)
+                yield CompletionResponse(
+                    text=increasing_concat, delta=increasing_concat[pref:]
+                )
 
         return gen()
 
@@ -498,3 +571,39 @@ class VllmServer(Vllm):
                 yield message
 
         return gen()
+
+    def _messages_to_prompt_text(self, messages: Sequence[ChatMessage]) -> str:
+        # Convert chat messages to a plain text prompt for OpenAI-like chat completion.
+        # This keeps parity with existing message->prompt formatting.
+        return self.messages_to_prompt(messages)
+
+    def _build_openai_payload(
+        self,
+        prompt: str,
+        params: Dict[str, Any],
+        chat: bool,
+        messages: Optional[Sequence[ChatMessage]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "temperature": params.get("temperature", self.temperature),
+            "top_p": params.get("top_p", self.top_p),
+            "n": params.get("n", self.n),
+            "max_tokens": params.get("max_new_tokens", self.max_new_tokens),
+        }
+
+        # Map stop sequences if provided
+        if params.get("stop"):
+            payload["stop"] = params["stop"]
+
+        if messages:
+            payload["messages"] = [
+                {
+                    "role": msg.role.value if hasattr(msg.role, "value") else msg.role,
+                    "content": msg.content,
+                }
+                for msg in messages
+            ]
+        else:
+            payload["messages"] = [{"role": "user", "content": prompt}]
+        return payload

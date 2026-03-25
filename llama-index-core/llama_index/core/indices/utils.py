@@ -1,7 +1,9 @@
 """Utilities for GPT indices."""
+
 import logging
 import re
 from llama_index.core.base.embeddings.base import BaseEmbedding
+from llama_index.core.base.llms.types import ChatMessage
 from llama_index.core.embeddings.multi_modal_base import MultiModalEmbedding
 from llama_index.core.schema import BaseNode, ImageNode, MetadataMode
 from llama_index.core.utils import globals_helper, truncate_text
@@ -18,7 +20,8 @@ def get_sorted_node_list(node_dict: Dict[int, BaseNode]) -> List[BaseNode]:
 
 
 def extract_numbers_given_response(response: str, n: int = 1) -> Optional[List[int]]:
-    """Extract number given the GPT-generated response.
+    """
+    Extract number given the GPT-generated response.
 
     Used by tree-structured indices.
 
@@ -48,27 +51,40 @@ def log_vector_store_query_result(
     """Log vector store query result."""
     logger = logger or _logger
 
-    assert result.ids is not None
-    assert result.nodes is not None
+    if result.ids is None:
+        return
+
     similarities = (
         result.similarities
         if result.similarities is not None and len(result.similarities) > 0
         else [1.0 for _ in result.ids]
     )
 
-    fmt_txts = []
-    for node_idx, node_similarity, node in zip(result.ids, similarities, result.nodes):
-        fmt_txt = f"> [Node {node_idx}] [Similarity score: \
-            {float(node_similarity):.6}] {truncate_text(node.get_content(), 100)}"
-        fmt_txts.append(fmt_txt)
-    top_k_node_text = "\n".join(fmt_txts)
-    logger.debug(f"> Top {len(result.nodes)} nodes:\n{top_k_node_text}")
+    if result.nodes is not None:
+        fmt_txts = []
+        for node_idx, node_similarity, node in zip(
+            result.ids, similarities, result.nodes
+        ):
+            fmt_txt = f"> [Node {node_idx}] [Similarity score: \
+                {float(node_similarity):.6}] {truncate_text(node.get_content(), 100)}"
+            fmt_txts.append(fmt_txt)
+        top_k_node_text = "\n".join(fmt_txts)
+        logger.debug(f"> Top {len(result.nodes)} nodes:\n{top_k_node_text}")
+    else:
+        fmt_txts = []
+        for node_idx, node_similarity in zip(result.ids, similarities):
+            fmt_txt = f"> [Node {node_idx}] [Similarity score: \
+                {float(node_similarity):.6}]"
+            fmt_txts.append(fmt_txt)
+        top_k_node_text = "\n".join(fmt_txts)
+        logger.debug(f"> Top {len(result.ids)} nodes:\n{top_k_node_text}")
 
 
 def default_format_node_batch_fn(
     summary_nodes: List[BaseNode],
 ) -> str:
-    """Default format node batch function.
+    """
+    Default format node batch function.
 
     Assign each summary node a number, and format the batch of nodes.
 
@@ -81,6 +97,24 @@ def default_format_node_batch_fn(
             f"{summary_nodes[idx].get_content(metadata_mode=MetadataMode.LLM)}"
         )
     return "\n\n".join(fmt_node_txts)
+
+
+def default_format_node_batch_for_chat_fn(
+    summary_nodes: list[BaseNode],
+) -> list[ChatMessage]:
+    """
+    Default format node batch function.
+
+    Assign each summary node a number, and format the batch of nodes.
+
+    """
+    content_messages = []
+    for node in summary_nodes:
+        content_messages.append(
+            ChatMessage(blocks=node.get_content_blocks(metadata_mode=MetadataMode.LLM))
+        )
+
+    return content_messages
 
 
 def default_parse_choice_select_answer_fn(
@@ -136,7 +170,8 @@ def default_parse_choice_select_answer_fn(
 def embed_nodes(
     nodes: Sequence[BaseNode], embed_model: BaseEmbedding, show_progress: bool = False
 ) -> Dict[str, List[float]]:
-    """Get embeddings of the given nodes, run embedding model if necessary.
+    """
+    Get embeddings of the given nodes, run embedding model if necessary.
 
     Args:
         nodes (Sequence[BaseNode]): The nodes to embed.
@@ -145,6 +180,7 @@ def embed_nodes(
 
     Returns:
         Dict[str, List[float]]: A map from node id to embedding.
+
     """
     id_to_embed_map: Dict[str, List[float]] = {}
 
@@ -172,7 +208,8 @@ def embed_image_nodes(
     embed_model: MultiModalEmbedding,
     show_progress: bool = False,
 ) -> Dict[str, List[float]]:
-    """Get image embeddings of the given nodes, run image embedding model if necessary.
+    """
+    Get image embeddings of the given nodes, run image embedding model if necessary.
 
     Args:
         nodes (Sequence[ImageNode]): The nodes to embed.
@@ -181,6 +218,7 @@ def embed_image_nodes(
 
     Returns:
         Dict[str, List[float]]: A map from node id to embedding.
+
     """
     id_to_embed_map: Dict[str, List[float]] = {}
 
@@ -206,7 +244,8 @@ def embed_image_nodes(
 async def async_embed_nodes(
     nodes: Sequence[BaseNode], embed_model: BaseEmbedding, show_progress: bool = False
 ) -> Dict[str, List[float]]:
-    """Async get embeddings of the given nodes, run embedding model if necessary.
+    """
+    Async get embeddings of the given nodes, run embedding model if necessary.
 
     Args:
         nodes (Sequence[BaseNode]): The nodes to embed.
@@ -215,6 +254,7 @@ async def async_embed_nodes(
 
     Returns:
         Dict[str, List[float]]: A map from node id to embedding.
+
     """
     id_to_embed_map: Dict[str, List[float]] = {}
 
@@ -242,7 +282,8 @@ async def async_embed_image_nodes(
     embed_model: MultiModalEmbedding,
     show_progress: bool = False,
 ) -> Dict[str, List[float]]:
-    """Get image embeddings of the given nodes, run image embedding model if necessary.
+    """
+    Get image embeddings of the given nodes, run image embedding model if necessary.
 
     Args:
         nodes (Sequence[ImageNode]): The nodes to embed.
@@ -251,6 +292,7 @@ async def async_embed_image_nodes(
 
     Returns:
         Dict[str, List[float]]: A map from node id to embedding.
+
     """
     id_to_embed_map: Dict[str, List[float]] = {}
 

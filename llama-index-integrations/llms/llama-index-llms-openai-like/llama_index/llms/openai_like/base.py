@@ -18,11 +18,11 @@ from llama_index.core.base.llms.generic_utils import (
     stream_completion_response_to_chat_response,
 )
 from llama_index.llms.openai.base import OpenAI, Tokenizer
-from transformers import AutoTokenizer
 
 
 class OpenAILike(OpenAI):
-    """OpenaAILike LLM.
+    """
+    OpenaAILike LLM.
 
     OpenAILike is a thin wrapper around the OpenAI model that makes it compatible with
     3rd party tools that provide an openai-compatible api.
@@ -78,11 +78,19 @@ class OpenAILike(OpenAI):
         ```python
         from llama_index.llms.openai_like import OpenAILike
 
-        llm = OpenAILike(model="my model", api_base="https://hostname.com/v1", api_key="fake")
+        llm = OpenAILike(
+            model="my model",
+            api_base="https://hostname.com/v1",
+            api_key="fake",
+            context_window=128000,
+            is_chat_model=True,
+            is_function_calling_model=False,
+        )
 
         response = llm.complete("Hello World!")
         print(str(response))
         ```
+
     """
 
     context_window: int = Field(
@@ -97,6 +105,13 @@ class OpenAILike(OpenAI):
         default=False,
         description=LLMMetadata.model_fields["is_function_calling_model"].description,
     )
+    should_use_structured_outputs: bool = Field(
+        default=False,
+        # https://platform.openai.com/docs/guides/structured-outputs
+        description=(
+            "Set True if the model supports structured output through response_format."
+        ),
+    )
     tokenizer: Union[Tokenizer, str, None] = Field(
         default=None,
         description=(
@@ -105,6 +120,18 @@ class OpenAILike(OpenAI):
             " disables inference of max_tokens."
         ),
     )
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        if isinstance(self.tokenizer, str):
+            try:
+                import transformers  # noqa: F401
+            except ImportError:
+                raise ImportError(
+                    "The `transformers` package is required when passing a string "
+                    "tokenizer name. Install it with: "
+                    "`pip install llama-index-llms-openai-like[transformers]`"
+                )
 
     @property
     def metadata(self) -> LLMMetadata:
@@ -119,12 +146,17 @@ class OpenAILike(OpenAI):
     @property
     def _tokenizer(self) -> Optional[Tokenizer]:
         if isinstance(self.tokenizer, str):
+            from transformers import AutoTokenizer
+
             return AutoTokenizer.from_pretrained(self.tokenizer)
         return self.tokenizer
 
     @classmethod
     def class_name(cls) -> str:
         return "OpenAILike"
+
+    def _should_use_structure_outputs(self) -> bool:
+        return self.should_use_structured_outputs
 
     def complete(
         self, prompt: str, formatted: bool = False, **kwargs: Any
